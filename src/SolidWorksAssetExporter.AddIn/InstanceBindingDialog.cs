@@ -51,6 +51,7 @@ namespace SolidWorksAssetExporter.AddIn
         private readonly HashSet<string> _pickedRelationIds = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _pickedParentContexts = new HashSet<string>(StringComparer.Ordinal);
         private readonly Dictionary<string, int> _pickedRoles = new Dictionary<string, int>(StringComparer.Ordinal);
+        private readonly Dictionary<int, Color> _roleTints = new Dictionary<int, Color>();
         private string _highlightHint;
         private const string ParentPickHint = "在 SOLIDWORKS 中选一个父资产，再点击“读取父组件”。";
         private string _hint = ParentPickHint;
@@ -177,7 +178,10 @@ namespace SolidWorksAssetExporter.AddIn
                         RefreshRelations(_session.Current.Relations);
                     if (Enabled && _continuous.Checked) PollSelection();
                     else if (Enabled && _highlightOnPick.Checked && Control.MouseButtons == MouseButtons.None)
-                        RefreshPickedHighlight();
+                    {
+                        if ((Control.ModifierKeys & (Keys.Control | Keys.Shift)) == Keys.None) RefreshPickedHighlight();
+                        else if (_hasAutomaticSelection) ResetPickedHighlight();
+                    }
                     else if (_hasAutomaticSelection && !IsCurrentContext()) ResetPickedHighlight();
                     RefreshSaveStatus();
                 }
@@ -399,10 +403,14 @@ namespace SolidWorksAssetExporter.AddIn
         private static List<ManualPick> ReadManualPicks(SelectionMgr selection)
         {
             var picks = new List<ManualPick>();
-            foreach (var index in ManualSelectionIndices(selection))
+            var normalCount = selection.GetSelectedObjectCount2(0);
+            var onlyNormalAndAutomatic = normalCount + SwBindingHighlight.AutomaticCount(selection) == selection.GetSelectedObjectCount2(-1);
+            var mark = onlyNormalAndAutomatic ? 0 : -1;
+            var indices = onlyNormalAndAutomatic ? Enumerable.Range(1, normalCount) : ManualSelectionIndices(selection);
+            foreach (var index in indices)
             {
-                var whole = selection.GetSelectedObject6(index, -1) as Component2;
-                var component = whole ?? SwBindingEndpoints.SelectedComponent(selection, index);
+                var whole = selection.GetSelectedObject6(index, mark) as Component2;
+                var component = whole ?? SwBindingEndpoints.SelectedComponent(selection, index, mark);
                 picks.Add(new ManualPick { Component = component, WholeComponent = whole != null,
                     Name = component == null ? string.Empty : component.Name2 });
             }
@@ -462,6 +470,7 @@ namespace SolidWorksAssetExporter.AddIn
 
         private int PaintHighlight(SelectionMgr selection, IDictionary<string, Component2> roles, IEnumerable<Component2> peers)
         {
+            _hasAutomaticSelection = true;
             var highlighted = SwBindingHighlight.SelectMany(_document, selection, peers, SwBindingHighlight.AssetMark);
             foreach (var mark in new[] { SwBindingHighlight.ParentMark, SwBindingHighlight.ChildMark })
                 highlighted += SwBindingHighlight.SelectMany(_document, selection,
@@ -538,8 +547,12 @@ namespace SolidWorksAssetExporter.AddIn
 
         private Color RoleTint(int mark)
         {
+            Color tint;
+            if (_roleTints.TryGetValue(mark, out tint)) return tint;
             var color = SwBindingHighlight.GetRoleColor(_app, mark);
-            return Color.FromArgb((color.R + 2 * 255) / 3, (color.G + 2 * 255) / 3, (color.B + 2 * 255) / 3);
+            tint = Color.FromArgb((color.R + 2 * 255) / 3, (color.G + 2 * 255) / 3, (color.B + 2 * 255) / 3);
+            _roleTints.Add(mark, tint);
+            return tint;
         }
 
         private static Component2 ResolveHighlightComponent(SwBindingEndpoints operation, IEnumerable<BindingEndpoint> endpoints)
@@ -586,7 +599,8 @@ namespace SolidWorksAssetExporter.AddIn
         {
             if (_assetsIsolated)
             {
-                RestoreAssetDisplay();
+                if (!RestoreAssetDisplay())
+                    throw new ValidationException("SOLIDWORKS 尚未退出隔离。可在图形区点击“退出隔离”。");
                 _hint = "已恢复装配显示。";
                 return;
             }
@@ -623,12 +637,16 @@ namespace SolidWorksAssetExporter.AddIn
             }
         }
 
-        private void RestoreAssetDisplay()
+        private bool RestoreAssetDisplay()
         {
-            try { ((AssemblyDoc)_document).ExitIsolate(); }
-            catch (COMException) { }
+            try
+            {
+                if (!((AssemblyDoc)_document).ExitIsolate()) return false;
+            }
+            catch (COMException) { return false; }
             _assetsIsolated = false;
             _assetIsolation.Text = "仅显示普通资产";
+            return true;
         }
 
         private void ClearSelectionQueue()

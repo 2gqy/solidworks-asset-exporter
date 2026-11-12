@@ -38,11 +38,11 @@ namespace SolidWorksAssetExporter.AddIn
 
         internal Func<BindingEndpoint, ExportNode> Resolve { get; private set; }
 
-        internal static Component2 SelectedComponent(SelectionMgr selection, int index)
+        internal static Component2 SelectedComponent(SelectionMgr selection, int index, int mark = -1)
         {
-            var component = selection.GetSelectedObjectsComponent4(index, -1) as Component2;
+            var component = selection.GetSelectedObjectsComponent4(index, mark) as Component2;
             if (component != null) return component;
-            var item = selection.GetSelectedObject6(index, -1);
+            var item = selection.GetSelectedObject6(index, mark);
             var entity = item as Entity;
             return item as Component2 ?? (entity == null ? null : entity.GetComponent() as Component2);
         }

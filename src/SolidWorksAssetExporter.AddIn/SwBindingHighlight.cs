@@ -34,11 +34,6 @@ namespace SolidWorksAssetExporter.AddIn
             if (marked.Length != 0) selection.DeSelect2(marked, -1);
         }
 
-        internal static bool Select(ModelDoc2 document, SelectionMgr selection, Component2 component, int mark)
-        {
-            return SelectMany(document, selection, new[] { component }, mark) == 1;
-        }
-
         internal static int SelectMany(ModelDoc2 document, SelectionMgr selection, IEnumerable<Component2> components,
             int mark, bool append = true)
         {
