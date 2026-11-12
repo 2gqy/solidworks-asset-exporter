@@ -27,6 +27,7 @@ $payload = Join-Path $packageRoot 'payload'
 $payloadFiles = @(
     'SolidWorksAssetExporter.AddIn.dll',
     'SolidWorksAssetExporter.Core.dll',
+    'SolidWorksAssetExporter.Mcp.exe',
     'SolidWorks.Interop.sldworks.dll',
     'SolidWorks.Interop.swconst.dll',
     'SolidWorks.Interop.swpublished.dll'

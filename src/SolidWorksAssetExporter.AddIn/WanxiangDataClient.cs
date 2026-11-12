@@ -30,6 +30,8 @@ namespace SolidWorksAssetExporter.AddIn
         [DataMember(Name = "files_extracted")] public int FilesExtracted { get; set; }
         [DataMember(Name = "bytes_written")] public long BytesWritten { get; set; }
         [IgnoreDataMember] public int HttpStatusCode { get; set; }
+        internal ExportReport ExportReport { get; set; }
+        internal string ExportReportSha256 { get; set; }
     }
 
     public sealed class WanxiangRegistryDownloadResult
@@ -136,6 +138,12 @@ namespace SolidWorksAssetExporter.AddIn
         public WanxiangDirectoryUploadResult UploadDirectory(string localDirectory, string remoteDirectory,
             Action<string> progress)
         {
+            return UploadDirectory(localDirectory, remoteDirectory, progress, false);
+        }
+
+        internal WanxiangDirectoryUploadResult UploadDirectory(string localDirectory, string remoteDirectory,
+            Action<string> progress, bool includeExportReport)
+        {
             localDirectory = Path.GetFullPath(localDirectory);
             if (!Directory.Exists(localDirectory)) throw new DirectoryNotFoundException("待上传目录不存在：" + localDirectory);
             var requestUri = Url("archive", remoteDirectory);
@@ -149,6 +157,8 @@ namespace SolidWorksAssetExporter.AddIn
                 var archiveBytes = new FileInfo(archivePath).Length;
                 Diagnostic("PROJECT PACK COMPLETE bytes=" + archiveBytes.ToString(CultureInfo.InvariantCulture) +
                     " elapsed_ms=" + elapsed.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture));
+                string reportSha256 = null;
+                var report = includeExportReport ? ReadArchiveExportReport(archivePath, out reportSha256) : null;
                 Report(progress, "Wanxiang assembly_package 打包完成（" + FormatBytes(archiveBytes) + "），正在发送到 Wanxiang...");
                 using (var stream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 using (var content = new StreamContent(stream))
@@ -165,8 +175,12 @@ namespace SolidWorksAssetExporter.AddIn
                         Report(progress, "Wanxiang assembly_package 已收到 HTTP " + ((int)response.StatusCode).ToString(
                             CultureInfo.InvariantCulture) + "，正在校验响应...");
                         EnsureSuccess(response, body);
+                        if (includeExportReport && response.StatusCode == HttpStatusCode.Accepted)
+                            throw new ValidationException("数据服务已接收装配包上传请求（HTTP 202），尚未确认写入完成。");
                         var result = Deserialize<WanxiangDirectoryUploadResult>(body);
                         result.HttpStatusCode = (int)response.StatusCode;
+                        result.ExportReport = report;
+                        result.ExportReportSha256 = reportSha256;
                         Report(progress, "Wanxiang assembly_package 上传完成：HTTP " + result.HttpStatusCode.ToString(
                             CultureInfo.InvariantCulture) + "，服务端写入 " + result.FilesExtracted.ToString(
                             CultureInfo.InvariantCulture) + " 个文件。");
@@ -488,6 +502,25 @@ namespace SolidWorksAssetExporter.AddIn
                     var entry = archive.CreateEntry(relative.Replace('\\', '/'), CompressionLevel.Optimal);
                     using (var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
                     using (var output = entry.Open()) input.CopyTo(output);
+                }
+            }
+        }
+
+        private static ExportReport ReadArchiveExportReport(string archivePath, out string sha256)
+        {
+            using (var stream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var archive = new ZipArchive(stream, ZipArchiveMode.Read))
+            {
+                var entry = archive.GetEntry("export-report.json");
+                if (entry == null) throw new ValidationException("装配包 ZIP 缺少 export-report.json。");
+                using (var source = entry.Open())
+                using (var report = new MemoryStream())
+                {
+                    source.CopyTo(report);
+                    report.Position = 0;
+                    sha256 = FileHash.Sha256(report);
+                    report.Position = 0;
+                    return JsonFile.Read<ExportReport>(report);
                 }
             }
         }

@@ -12,6 +12,8 @@ namespace SolidWorks.Interop.sldworks
     public interface DAssemblyDocEvents_Event
     {
         event Func<int> NewSelectionNotify;
+        event Func<int> ClearSelectionsNotify;
+        event Func<int> UserSelectionPostNotify;
         event Func<int> SaveToStorageNotify;
         event Func<int, string, int> FileSavePostNotify;
         event Func<int> FileSavePostCancelNotify;
@@ -44,6 +46,7 @@ namespace SolidWorks.Interop.sldworks
     public interface Component2
     {
         string Name2 { get; }
+        string GetSelectByIDString();
         int GetID(); int Visible { get; }
         object GetParent();
         bool IsSuppressed(); int GetSuppression2(); int SetSuppression2(int state); bool IsEnvelope(); bool IsFixed(); bool IsHidden(bool considerSuppressed); bool Select4(bool append, object data, bool showPopup);
@@ -66,9 +69,13 @@ namespace SolidWorks.Interop.sldworks
         FeatureManager FeatureManager { get; }
         ModelDocExtension Extension { get; }
         object SelectionManager { get; }
-        void ClearSelection2(bool all); bool ShowConfiguration2(string name);
+        void ClearSelection2(bool all); bool ShowConfiguration2(string name); void GraphicsRedraw2();
     }
 
+    public interface Entity
+    {
+        object GetComponent();
+    }
     public interface Feature
     {
         string GetTypeName2();
@@ -96,6 +103,8 @@ namespace SolidWorks.Interop.sldworks
     public interface AssemblyDoc : ModelDoc2
     {
         int GetLightWeightComponentCount(); int ResolveAllLightWeightComponents(bool warnUser);
+        object GetComponents(bool topLevelOnly);
+        bool Isolate(); bool ExitIsolate(); void SetIsolateVisibility(int option);
     }
     public interface View
     {
@@ -110,6 +119,8 @@ namespace SolidWorks.Interop.sldworks
     }
     public interface ModelDocExtension
     {
+        bool SelectByID2(string name, string type, double x, double y, double z, bool append, int mark, object callout, int option);
+        int MultiSelect2(object objects, bool append, object data);
         object GetPersistReference3(object value); object GetObjectByPersistReference3(object bytes, out int error);
         PackAndGo GetPackAndGo(); object SavePackAndGo(PackAndGo value);
         bool SaveAs(string name, int version, int options, object exportData, ref int errors, ref int warnings);
@@ -125,8 +136,11 @@ namespace SolidWorks.Interop.sldworks
     {
         int GetSelectedObjectCount2(int mark); object GetSelectedObject6(int index, int mark);
         object GetSelectedObjectsComponent4(int index, int mark);
-        int GetSelectedObjectMark(int index); object CreateSelectData();
+        int GetSelectedObjectMark(int index); SelectData CreateSelectData();
+        int DeSelect2(object indices, int mark);
+        void set_SelectionColor(int mark, int color);
     }
+    public interface SelectData { int Mark { get; set; } }
     public interface ExportPdfData { bool SetSheets(int mode, object sheets); bool ViewPdfAfterSaving { get; set; } }
     public interface PackAndGo
     {
@@ -155,12 +169,14 @@ namespace SolidWorks.Interop.swconst
     public enum swFeatMgrPane_e { swFeatMgrPaneTop = 0, swFeatMgrPaneBottom = 1 }
     public enum swTreeControlItemType_e { swFeatureManagerItem_Feature = 1, swFeatureManagerItem_Component = 2 }
     public enum swComponentVisibilityState_e { swComponentHidden = 0, swComponentVisible = 1, swComponentUnknown = -1 }
+    public enum swIsolateVisibility_e { swIsolateVisibility_HIDDEN = 2 }
     public enum swComponentSuppressionState_e { swComponentSuppressed = 0, swComponentLightweight = 1, swComponentFullyResolved = 2, swComponentResolved = 3, swComponentFullyLightweight = 4, swComponentInternalIdMismatch = 5 }
     public enum swComponentResolveStatus_e { swResolveOk = 0, swResolveAbortedByUser = 1, swResolveNotPerformed = 2, swResolveError = 3 }
     public enum swCustomInfoGetResult_e { swCustomInfoGetResult_CachedValue = 0, swCustomInfoGetResult_NotPresent = 1, swCustomInfoGetResult_ResolvedValue = 2 }
     public enum swSummInfoField_e { swSumInfoCreateDate = 6 }
     public enum swDocumentTypes_e { swDocPART = 1, swDocASSEMBLY = 2, swDocDRAWING = 3 }
-    public enum swUserPreferenceIntegerValue_e { swStepAP, swStepExportPreference, swExportStlUnits, swSTLQuality }
+    public enum swUserPreferenceIntegerValue_e { swStepAP, swStepExportPreference, swExportStlUnits, swSTLQuality,
+        swSystemColorsSelectedItem1, swSystemColorsSelectedItem2, swSystemColorsSelectedItem3 }
     public enum swUserPreferenceToggle_e { swStepExportAtomicSave, swSTLBinaryFormat, swSTLDontTranslateToPositive, swSTLComponentsIntoOneFile, swSTLShowInfoOnSave, swSTLPreview, swSTLCheckForInterference }
     public enum swUserPreferenceStringValue_e { swExportOutputCoordinateSystem }
     public enum swAcisOutputGeometryPreference_e { swAcisOutputAsSolidAndSurface }

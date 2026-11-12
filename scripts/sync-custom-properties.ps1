@@ -135,8 +135,9 @@ function Sync-Document($document, [object[]]$schemaRows, [bool]$applyChanges) {
     $existing = @{}
     foreach ($name in $existingNames) { $existing[$name] = $true }
 
-    $remove = @($existingNames | Where-Object { -not $required.Contains($_) })
-    $add = @($required.Keys | Where-Object { -not $existing.ContainsKey($_) })
+    $managed = @('connection_interface', 'accepts_interfaces', 'slots_num', 'asset_version', 'assembly_version')
+    $remove = @($existingNames | Where-Object { $_ -notin $managed -and -not $required.Contains($_) })
+    $add = @($required.Keys | Where-Object { $_ -notin $managed -and -not $existing.ContainsKey($_) })
     if ($remove.Count -eq 0 -and $add.Count -eq 0) {
         Write-Host "UNCHANGED [$kind] $path"
         return

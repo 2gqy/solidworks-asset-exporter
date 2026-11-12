@@ -19,6 +19,7 @@ namespace SolidWorksAssetExporter.Core.Tests
             RunBindingEditorTests();
             Run("Binding AT-04 repeated asset occurrences remain distinct", BindingRepeatedInstances);
             Run("Binding AT-06 apply is idempotent and unbind is specific", BindingIdempotence);
+            Run("Duplicate stored bindings merge on read and after instance resolution", BindingDuplicateRecords);
             Run("Binding AT-07 invalid batch is atomic and replacement is explicit", BindingAtomicConflict);
             Run("Binding multiple parents allow diamonds but reject cycles and duplicate edges", BindingMultipleParentGraphs);
             Run("Binding shared child exports a separate relative pose for each parent", BindingMultipleParentPoses);
@@ -27,6 +28,8 @@ namespace SolidWorksAssetExporter.Core.Tests
             Run("Binding AT-10 cross-group multilevel chains are allowed", BindingChains);
             Run("Binding AT-03 unsupported endpoints do not expand Asset boundaries", BindingEndpointKinds);
             Run("Binding AT-11 required interfaces and role chains are revalidated", BindingInterfaces);
+            Run("New compatible binding preserves an existing incompatible parent edge", BindingPreservesInterfaceConflicts);
+            Run("Pipette installation interface is a Tool alias for the pipette interface", BindingPipetteToolInterface);
             Run("Optional Asset interfaces are required on explicit binding endpoints", BindingOptionalInterfaces);
             Run("Binding rack supports direct tools and changer children in exported packages", BindingRackTools);
             Run("Binding direct rack tools retain interface checks and support shared tools", BindingRackToolGuards);
@@ -45,6 +48,7 @@ namespace SolidWorksAssetExporter.Core.Tests
             Run("Binding AT-17 configurations and copies do not share records", BindingConfigurations);
             Run("Binding AT-29 binding dirty bypasses internal mutation exemptions", BindingBusinessDirty);
             Run("Binding AT-18 unresolved persistent refs never fall back", BindingNoFallback);
+            Run("Binding graph reuses identical stored references only within one pass", BindingResolverCache);
             Run("Binding storage corruption and unsupported schemas fail closed", BindingCorruptStorage);
         }
         private sealed class BindingFixture
@@ -79,9 +83,39 @@ namespace SolidWorksAssetExporter.Core.Tests
         }
         private static void BindingIdempotence()
         {
-            var f = new BindingFixture(); f.Apply("A", false, "T1", "T2"); var id = f.Records[0].Id;
+            var f = new BindingFixture(); f.Apply("A", false, "T1"); var id = f.Records[0].Id;
+            f.Apply("A", false, "T1", "T2"); Equal(2, f.Records.Count); Equal(id, f.Records[0].Id);
             f.Apply("A", false, "T1"); Equal(2, f.Records.Count); Equal(id, f.Records[0].Id);
             f.Records.RemoveAll(r => r.Child.Reference == "T1"); Equal("T2", f.Export().Relations.Single().ChildNodeId);
+        }
+        private static void BindingDuplicateRecords()
+        {
+            var f = new BindingFixture();
+            f.Apply("A", false, "T1");
+            f.Apply("B", false, "T1");
+            var first = f.Records[0];
+            f.Records.Add(new InstanceBinding { Parent = f.E("A"), Child = f.E("T1") });
+            var data = new BindingDocument();
+            data.Configurations.Add(new ConfigurationBindings { ConfigurationId = 1, Relations = f.Records.ToList() });
+            var serializer = new System.Runtime.Serialization.DataContractSerializer(typeof(BindingDocument));
+            var doc = new BindingTestDocument();
+            using (var stream = new MemoryStream()) { serializer.WriteObject(stream, data); doc.Bytes = stream.ToArray(); }
+            var session = SwInstanceBindings.ForDocument(doc);
+            try
+            {
+                Equal(2, session.Current.Relations.Count);
+                Equal(first.Id, session.Current.Relations[0].Id);
+                True(!session.Pending);
+            }
+            finally { session.Dispose(); }
+
+            var alias = f.E("renamed-reference");
+            f.Nodes.Add(alias.Reference, f.Nodes["A"]);
+            f.Records.Add(new InstanceBinding { Parent = alias, Child = f.E("T1") });
+            Equal(2, f.Export().Relations.Count);
+            f.Apply("A", false, "T1");
+            Equal(2, f.Records.Count);
+            Equal(first.Id, f.Records[0].Id);
         }
         private static void BindingAtomicConflict()
         {
@@ -105,8 +139,9 @@ namespace SolidWorksAssetExporter.Core.Tests
             var removed = f.Records.Single(r => r.Parent.Reference == "T1" && r.Child.Reference == "T3");
             f.Records.Remove(removed); Equal(4, f.Export().Relations.Count);
             Equal(2, f.Export().Relations.Count(r => r.ChildNodeId == "T3"));
-            f.Records.Add(new InstanceBinding { Parent = f.E("T2"), Child = f.E("T3") });
-            Throws<ValidationException>(() => f.Export());
+            var malformed = f.Export();
+            malformed.Relations.Add(malformed.Relations.First());
+            Throws<ValidationException>(() => malformed.Validate(BindingXml(f), f.Plan.AssemblyUuid, f.Plan.AssemblyVersion));
         }
         private static void BindingMultipleParentPoses()
         {
@@ -187,7 +222,10 @@ namespace SolidWorksAssetExporter.Core.Tests
             var f = new BindingFixture(); f.Nodes["A"].Properties[PropertyRules.ConnectionInterface] = "";
             f.Apply("A", false, "T1"); Equal(1, f.Export().Relations.Count);
             f.Nodes["T1"].Properties[PropertyRules.ConnectionInterface] = "mismatch";
-            Throws<ValidationException>(() => f.Export()); Throws<ValidationException>(() => f.Apply("A", false, "T2", "T1")); Equal(1, f.Records.Count);
+            Throws<ValidationException>(() => f.Export());
+            var retained = f.Records.Single();
+            f.Apply("A", false, "T2", "T1");
+            Equal(2, f.Records.Count); Equal(retained, f.Records[0]);
             f.Nodes["T1"].Properties[PropertyRules.ConnectionInterface] = ""; Throws<ValidationException>(() => f.Export());
             f = new BindingFixture(); f.Nodes["A"].Properties[PropertyRules.IsQuickChangerRack] = "1";
             f.Nodes["A"].Properties[PropertyRules.AssetClass] = "station";
@@ -195,6 +233,44 @@ namespace SolidWorksAssetExporter.Core.Tests
             f.Nodes["T1"].Properties[PropertyRules.IsQuickChanger] = "1";
             f.Nodes["T1"].Properties[PropertyRules.QuickChangerSide] = "tool_side";
             f.Apply("A", false, "T1"); Equal(1, f.Export().Relations.Count);
+        }
+
+        private static void BindingPreservesInterfaceConflicts()
+        {
+            var f = new BindingFixture();
+            f.Apply("A", false, "T1");
+            var retained = f.Records.Single();
+            f.Nodes["T1"].Properties[PropertyRules.ConnectionInterface] = "alternate";
+            f.Nodes["B"].Properties[PropertyRules.AcceptsInterfaces] = "alternate";
+            f.Apply("B", false, "T1");
+            Equal(2, f.Records.Count);
+            Equal(retained, f.Records[0]);
+            Equal("B", f.Records[1].Parent.Reference);
+            Throws<ValidationException>(() => f.Apply("T1", false, "A"));
+            Throws<ValidationException>(() => f.Apply("B", false, "T2"));
+            Throws<ValidationException>(() => f.Apply("A", true, "T1"));
+            Throws<ValidationException>(() => f.Export());
+            Equal(2, f.Records.Count);
+        }
+
+        private static void BindingPipetteToolInterface()
+        {
+            var f = new BindingFixture();
+            var parent = f.Nodes["A"].Properties;
+            var child = f.Nodes["T1"].Properties;
+            parent[PropertyRules.AcceptsInterfaces] = "移液器;快换盘.B型";
+            child[PropertyRules.ConnectionInterface] = "工具安装.移液器";
+            Throws<ValidationException>(() => f.Apply("A", false, "T1"));
+
+            child[PropertyRules.IsTool] = "1";
+            f.Apply("A", false, "T1");
+            Equal(1, f.Export().Relations.Count);
+
+            parent[PropertyRules.AcceptsInterfaces] = "工具安装.移液器";
+            child[PropertyRules.ConnectionInterface] = "移液器";
+            Equal(1, f.Export().Relations.Count);
+            child[PropertyRules.ConnectionInterface] = "工具安装.电动助吸器";
+            Throws<ValidationException>(() => f.Export());
         }
 
         private static void BindingOptionalInterfaces()
@@ -428,7 +504,7 @@ namespace SolidWorksAssetExporter.Core.Tests
                 var f = new BindingFixture(); f.Apply("A", false, "T1"); f.Apply("B", false, "T1");
                 s.Commit(f.Records.ToList()); True(s.Pending); True(d.Dirty);
                 d.Save(false); True(s.Pending); d.FailWrite = true; d.Save(true); True(s.Pending); True(s.LastSaveError != null);
-                d.FailWrite = false; d.Save(true); True(!s.Pending); True(s.LastSaveError == null);
+                d.FailWrite = false; s.Save(true); Equal(1, d.SaveOptions); True(!s.Pending); True(s.LastSaveError == null);
                 var bytes = d.Bytes; s.Dispose();
                 var reopened = new BindingTestDocument { Bytes = bytes }; var next = SwInstanceBindings.ForDocument(reopened);
                 try { Equal(2, next.Current.Relations.Count); Equal(2, next.Current.Relations.Select(r => r.Parent.Context).Distinct().Count()); Equal(1, next.Current.Relations.Select(r => r.Child.Context).Distinct().Count()); True(!next.Pending); }
@@ -481,6 +557,27 @@ namespace SolidWorksAssetExporter.Core.Tests
             try { Throws<ValidationException>(() => s.ResolveComponent(new BindingEndpoint { Reference = Convert.ToBase64String(new byte[] { 1 }), DisplayName = "same", AssetId = "same:1", Context = "1" })); }
             finally { s.Dispose(); }
         }
+        private static void BindingResolverCache()
+        {
+            var extension = new FakeModelDocExtension();
+            var document = new BindingTestDocument { ReferenceExtension = extension };
+            using (var session = SwInstanceBindings.ForDocument(document))
+            {
+                var plan = new AssemblyExportPlan();
+                var resolve = session.CreateResolver(plan);
+                var reference = Convert.ToBase64String(new byte[] { 1 });
+                var first = new BindingEndpoint { Reference = reference, Context = "1" };
+                var copy = new BindingEndpoint { Reference = reference, Context = "1" };
+                var other = new BindingEndpoint { Reference = reference, Context = "2" };
+                Throws<ValidationException>(() => resolve(first));
+                Throws<ValidationException>(() => resolve(copy));
+                Equal(1, extension.PersistReferenceReads);
+                Throws<ValidationException>(() => resolve(other));
+                Equal(2, extension.PersistReferenceReads);
+                Throws<ValidationException>(() => session.CreateResolver(plan)(first));
+                Equal(3, extension.PersistReferenceReads);
+            }
+        }
         private static void BindingCorruptStorage()
         {
             var d = new BindingTestDocument { Bytes = new byte[] { 1, 2, 3 } }; var s = SwInstanceBindings.ForDocument(d);
@@ -498,14 +595,19 @@ namespace SolidWorksAssetExporter.Core.Tests
         public int Id = 1; public int GetID() { return Id; }
         public string Name { get; set; }
         public Configuration ActiveConfiguration { get { return this; } }
-        public Component2 GetRootComponent3(bool resolve) { return null; }
+        public Component2 RootComponent { get; set; }
+        public Component2 GetRootComponent3(bool resolve) { return RootComponent; }
         public object GetDisplayStates() { return null; }
     }
     public sealed class BindingTestDocument : ModelDoc2, DAssemblyDocEvents_Event
     {
         public event Func<int> NewSelectionNotify { add { } remove { } }
+        public event Func<int> ClearSelectionsNotify { add { } remove { } }
+        public event Func<int> UserSelectionPostNotify { add { } remove { } }
         public readonly BindingTestConfiguration Config = new BindingTestConfiguration { Name = "A" };
         public bool Dirty, FailWrite, Released; public byte[] Bytes; private BindingTestStream _writing;
+        public int SaveOptions;
+        public ModelDocExtension ReferenceExtension;
         public event Func<int> SaveToStorageNotify;
         public event Func<int, string, int> FileSavePostNotify;
         public event Func<int> FileSavePostCancelNotify;
@@ -521,7 +623,7 @@ namespace SolidWorksAssetExporter.Core.Tests
         { if (storing) return FailWrite ? null : (_writing = new BindingTestStream(new byte[0])); return Bytes == null ? null : new BindingTestStream(Bytes); }
         public void IRelease3rdPartyStorage(string name) { Released = true; }
         public void SetSaveFlag() { Dirty = true; }
-        public bool Save3(int options, ref int errors, ref int warnings) { throw new NotSupportedException(); }
+        public bool Save3(int options, ref int errors, ref int warnings) { SaveOptions = options; Save(true); return true; }
         int ModelDoc2.GetType() { return 2; }
         public string GetPathName() { return @"C:\models\binding.SLDASM"; }
         public string GetTitle() { return "binding.SLDASM"; }
@@ -530,9 +632,10 @@ namespace SolidWorksAssetExporter.Core.Tests
         public bool IsOpenedReadOnly() { return false; } public bool Visible { get; set; }
         public ConfigurationManager ConfigurationManager { get { return Config; } }
         public FeatureManager FeatureManager { get { return null; } }
-        public ModelDocExtension Extension { get { return null; } }
+        public ModelDocExtension Extension { get { return ReferenceExtension; } }
         public object SelectionManager { get { return null; } }
         public void ClearSelection2(bool all) { } public bool ShowConfiguration2(string name) { return true; }
+        public void GraphicsRedraw2() { }
     }
     public sealed class BindingTestStream : IStream
     {

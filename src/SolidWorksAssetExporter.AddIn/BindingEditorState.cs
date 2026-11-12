@@ -14,8 +14,10 @@ namespace SolidWorksAssetExporter.AddIn
         public void SetParent(BindingEndpoint parent) { Parent = parent; NextParents.Clear(); }
         public void AddChildren(IEnumerable<BindingEndpoint> endpoints)
         {
+            var contexts = new HashSet<string>(Children.Select(c => c.Context), StringComparer.Ordinal);
+            if (Parent != null) contexts.Add(Parent.Context);
             foreach (var e in endpoints)
-                if (e != null && (Parent == null || e.Context != Parent.Context) && !Children.Any(c => c.Context == e.Context)) Children.Add(e);
+                if (e != null && contexts.Add(e.Context)) Children.Add(e);
         }
         public void Applied(bool chain)
         {
@@ -40,6 +42,29 @@ namespace SolidWorksAssetExporter.AddIn
         { return records.GroupBy(r => r.Parent.Context, StringComparer.Ordinal); }
         public static List<BindingEndpoint> Parents(IEnumerable<InstanceBinding> records, BindingEndpoint child)
         { return records.Where(r => r.Child.Context == child.Context).Select(r => r.Parent).GroupBy(p => p.Context, StringComparer.Ordinal).Select(g => g.First()).ToList(); }
+
+        internal static IList<InstanceBinding> RelationsForPick(ILookup<string, InstanceBinding> relations, string context, out string endpointContext)
+        {
+            while (!string.IsNullOrEmpty(context))
+            {
+                if (relations.Contains(context))
+                {
+                    endpointContext = context;
+                    return relations[context].ToList();
+                }
+                var separator = context.LastIndexOf('/');
+                context = separator < 0 ? null : context.Substring(0, separator);
+            }
+            endpointContext = null;
+            return new InstanceBinding[0];
+        }
+
+        internal static ILookup<string, InstanceBinding> IndexRelatedInstances(IEnumerable<InstanceBinding> records)
+        {
+            return records.SelectMany(relation => new[] { relation.Parent.Context, relation.Child.Context }
+                .Distinct(StringComparer.Ordinal).Select(context => new { Context = context, Relation = relation }))
+                .ToLookup(item => item.Context, item => item.Relation, StringComparer.Ordinal);
+        }
         public static string OwnerContext(string context)
         { var i = (context ?? "").LastIndexOf('/'); return i < 0 ? "" : context.Substring(0, i); }
         public static bool SameSiblingAsset(BindingEndpoint seed, BindingEndpoint other)

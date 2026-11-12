@@ -2,13 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using SolidWorks.Interop.sldworks;
+using SolidWorks.Interop.swconst;
 using SolidWorksAssetExporter.Core;
 
 namespace SolidWorksAssetExporter.AddIn
 {
-    public sealed partial class InstanceBindingDialog : Form
+    public sealed class InstanceBindingDialog : Form
     {
         private readonly SldWorks _app;
         private readonly ModelDoc2 _document;
@@ -20,83 +22,198 @@ namespace SolidWorksAssetExporter.AddIn
         private readonly DataGridView _parents = Grid(false), _details = Grid(true);
         private readonly CheckBox _continuous = new CheckBox { Text = "连续点选子组件", AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
         private readonly CheckBox _chain = new CheckBox { Text = "链式绑定", AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
-        private readonly ComboBox _nextParent = new ComboBox { Width = 245, DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false };
-        private readonly TextBox _search = new TextBox { Width = 240 };
+        private readonly CheckBox _highlightOnPick = new CheckBox { Text = "点选时高亮关联组件", Checked = true, AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
+        private readonly ComboBox _nextParent = new ComboBox { Width = 185, DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false };
+        private readonly TextBox _search = new TextBox { Width = 180 };
         private readonly Label _state = new Label { Dock = DockStyle.Fill };
         private readonly Label _childCount = new Label { AutoSize = true, Padding = new Padding(0, 7, 0, 0) };
-        private readonly Label _totals = new Label { AutoSize = true, Padding = new Padding(0, 7, 0, 0) };
+        private readonly Label _totals = new Label { AutoSize = true, Anchor = AnchorStyles.Left };
+        private readonly TableLayoutPanel _interfaceBanner = new TableLayoutPanel
+            { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 1, BackColor = Color.MistyRose, Visible = false };
+        private readonly Label _interfaceSummary = new Label
+            { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.DarkRed };
+        private readonly Button _interfaceIssues;
+        private readonly Button _assetIsolation;
         private readonly Timer _timer = new Timer { Interval = 250 };
         private readonly DAssemblyDocEvents_Event _selectionEvents;
-        private readonly List<BindingEndpoint> _selectionQueue = new List<BindingEndpoint>();
-        private string _selectionError;
-        private Dictionary<string, ExportNode> _selectionNodes;
+        private readonly List<Component2> _selectionQueue = new List<Component2>();
+        private readonly HashSet<string> _queuedSelectionNames = new HashSet<string>(StringComparer.Ordinal);
         private List<RelationView> _views = new List<RelationView>();
         private bool _busy, _rendering;
-        private string _hint = "先读取父组件，再在模型中逐个点选子组件。";
+        private long _displayedRevision;
+        internal bool Busy { get { return _busy; } }
+        internal Func<bool> McpRunning { get; set; }
+        private string _displayedSavedState;
+        private bool _relationsValidated;
+        private ILookup<string, InstanceBinding> _relationsByEndpoint;
+        private bool _highlightPending, _hasAutomaticSelection, _assetsIsolated;
+        private string _lastPickedSelection;
+        private readonly HashSet<string> _pickedRelationIds = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> _pickedParentContexts = new HashSet<string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, int> _pickedRoles = new Dictionary<string, int>(StringComparer.Ordinal);
+        private string _highlightHint;
+        private const string ParentPickHint = "在 SOLIDWORKS 中选一个父资产，再点击“读取父组件”。";
+        private string _hint = ParentPickHint;
 
         public InstanceBindingDialog(SldWorks app)
         {
             _app = app; _document = app.ActiveDoc as ModelDoc2;
             _session = SwInstanceBindings.ForDocument(_document);
             if (_session == null) throw new ValidationException("请先打开一个可写的总装配体。");
-            _session.RequireWritable(); _configurationId = _session.Current.ConfigurationId;
-            Text = "承载关系 · " + _document.GetTitle() + " · " + _session.Current.ConfigurationName;
-            Size = new Size(1220, 840); MinimumSize = new Size(1100, 740);
-            StartPosition = FormStartPosition.CenterScreen; Font = new Font("Microsoft YaHei UI", 9F);
-            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9, Padding = new Padding(14) };
+            _session.RequireWritable();
+            var current = _session.Current;
+            _configurationId = current.ConfigurationId;
+            Text = "承载关系 · " + _document.GetTitle() + " · " + current.ConfigurationName;
+            Size = new Size(1040, 700); MinimumSize = new Size(840, 590);
+            StartPosition = FormStartPosition.Manual; Font = new Font("Microsoft YaHei UI", 9F);
+            var frame = app.IFrameObject();
+            var workArea = Screen.FromHandle(frame == null ? IntPtr.Zero : new IntPtr(frame.GetHWndx64())).WorkingArea;
+            Location = new Point(Math.Max(workArea.Left, workArea.Right - Width), workArea.Top);
+            var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 10, Padding = new Padding(14) };
             foreach (var height in new[] { 32, 42, 40 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 28));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 72));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
-            layout.Controls.Add(new Label { Text = "读取父组件 → 添加子组件 → 应用绑定。允许一个子组件关联多个父组件；新增绑定保留已有父级。", Dock = DockStyle.Fill }, 0, 0);
+            layout.Controls.Add(new Label { Text = "在 SOLIDWORKS 中选父组件。子组件可 Ctrl 多选或在图形区框选，再点击“添加所选子组件”。", Dock = DockStyle.Fill }, 0, 0);
             var parentBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
             parentBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155)); parentBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            parentBar.Controls.Add(Button("父组件 · 读取单选", CaptureParent)); parentBar.Controls.Add(_parentText); layout.Controls.Add(parentBar, 0, 1);
+            parentBar.Controls.Add(Button("读取父组件", CaptureParent)); parentBar.Controls.Add(_parentText); layout.Controls.Add(parentBar, 0, 1);
             var childBar = Bar(); childBar.Controls.Add(_continuous);
-            childBar.Controls.Add(Button("添加当前选择", CaptureChildren)); childBar.Controls.Add(Button("同级同款批量添加", CaptureSiblings));
+            childBar.Controls.Add(Button("添加所选子组件", CaptureChildren)); childBar.Controls.Add(Button("同级同款批量添加", CaptureSiblings));
             childBar.Controls.Add(Button("移除选中子项", delegate { foreach (var e in _childList.SelectedItems.Cast<EndpointItem>().ToArray()) _draft.Children.Remove(e.Endpoint); RefreshDraft(); }));
-            childBar.Controls.Add(Button("清空本轮", delegate { _continuous.Checked = false; _draft.Clear(); _document.ClearSelection2(true); RefreshDraft(); }));
+            childBar.Controls.Add(Button("清空本轮", delegate { _draft.Clear(); _continuous.Checked = false; _document.ClearSelection2(true); _hint = ParentPickHint; RefreshDraft(); }));
             childBar.Controls.Add(_childCount); layout.Controls.Add(childBar, 0, 2); layout.Controls.Add(_childList, 0, 3);
             var applyBar = Bar(); applyBar.Controls.Add(Button("应用绑定", delegate { Apply(false); }));
             applyBar.Controls.Add(Button("替换全部父组件…", delegate { Apply(true); })); applyBar.Controls.Add(_chain);
             applyBar.Controls.Add(new Label { Text = "下一父组件", AutoSize = true, Padding = new Padding(8, 7, 0, 0) }); applyBar.Controls.Add(_nextParent);
             applyBar.Controls.Add(Button("将所选子项作为父", ContinueFromSelected)); layout.Controls.Add(applyBar, 0, 4);
             var filterBar = Bar(); filterBar.Controls.Add(new Label { Text = "搜索父 / 子", AutoSize = true, Padding = new Padding(0, 7, 0, 0) }); filterBar.Controls.Add(_search);
-            filterBar.Controls.Add(Button("查看全部 / 刷新", delegate { _search.Clear(); RefreshRelations(); })); filterBar.Controls.Add(_totals); layout.Controls.Add(filterBar, 0, 5);
+            filterBar.Controls.Add(Button("查看全部", delegate { _search.Clear(); }));
+            filterBar.Controls.Add(Button("向所选父组件添加子项", AppendToSelectedParent));
+            filterBar.Controls.Add(Button("校验已有关系", ValidateRelations));
+            _assetIsolation = Button("仅显示普通资产", ToggleAssetIsolation);
+            filterBar.Controls.Add(_assetIsolation);
+            layout.Controls.Add(filterBar, 0, 5);
+            var summary = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 2 };
+            summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            summary.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            summary.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            summary.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            summary.Controls.Add(_totals, 0, 0);
+            _highlightOnPick.Padding = Padding.Empty;
+            var selectionLegend = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
+            selectionLegend.Controls.Add(_highlightOnPick);
+            selectionLegend.Controls.Add(RoleLegend("同资产", SwBindingHighlight.AssetMark));
+            selectionLegend.Controls.Add(RoleLegend("直接父级", SwBindingHighlight.ParentMark));
+            selectionLegend.Controls.Add(RoleLegend("直接子级", SwBindingHighlight.ChildMark));
+            summary.Controls.Add(selectionLegend, 1, 0);
+            _interfaceIssues = Button("定位接口冲突", ShowInterfaceIssues, false);
+            _interfaceIssues.ForeColor = Color.DarkRed;
+            _interfaceIssues.Margin = new Padding(4);
+            _interfaceBanner.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            _interfaceBanner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            _interfaceBanner.Controls.Add(_interfaceSummary, 0, 0);
+            _interfaceBanner.Controls.Add(_interfaceIssues, 1, 0);
+            summary.Controls.Add(_interfaceBanner, 0, 1);
+            summary.SetColumnSpan(_interfaceBanner, 2);
+            layout.Controls.Add(summary, 0, 6);
             _parents.Columns.Add("parent", "父组件（每个实例一行）"); _parents.Columns.Add("count", "子组件数"); _parents.Columns.Add("status", "状态");
             _parents.Columns[0].FillWeight = 65; _parents.Columns[1].FillWeight = 15; _parents.Columns[2].FillWeight = 20;
+            _parents.Columns[1].MinimumWidth = 74;
             _details.Columns.Add("child", "子组件明细（可多选）"); _details.Columns.Add("parents", "父级数"); _details.Columns.Add("status", "状态");
             _details.Columns[0].FillWeight = 65; _details.Columns[1].FillWeight = 12; _details.Columns[2].FillWeight = 23;
+            _details.Columns[1].MinimumWidth = 62;
+            _parents.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+            _details.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             var split = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
             split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 43)); split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 57));
-            split.Controls.Add(_parents, 0, 0); split.Controls.Add(_details, 1, 0); layout.Controls.Add(split, 0, 6);
-            var editBar = Bar(); editBar.Controls.Add(Button("高亮所选子关系", delegate { Highlight(SelectedRecords().SelectMany(r => new[] { r.Parent, r.Child })); }));
+            split.Controls.Add(_parents, 0, 0); split.Controls.Add(_details, 1, 0); layout.Controls.Add(split, 0, 7);
+            var editBar = Bar(); editBar.Controls.Add(Button("高亮所选子关系", delegate { Highlight(SelectedRecords()); }));
             editBar.Controls.Add(Button("解除所选子关系", delegate { Unbind(false); })); editBar.Controls.Add(Button("解除整组关系…", delegate { Unbind(true); }));
-            editBar.Controls.Add(Button("将所选子项加入本轮", LoadSelectedChildren)); layout.Controls.Add(editBar, 0, 7);
-            editBar.Controls.Add(Button("接口属性 / 建议…", EditInterfaces));
+            editBar.Controls.Add(Button("将所选子项加入本轮", LoadSelectedChildren)); layout.Controls.Add(editBar, 0, 8);
             var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            footer.Controls.Add(Button("保存总装配", SaveAssembly)); footer.Controls.Add(_state); layout.Controls.Add(footer, 0, 8);
-            InitializeBindingPages(layout);
+            footer.Controls.Add(Button("保存总装配", SaveAssembly)); footer.Controls.Add(_state); layout.Controls.Add(footer, 0, 9);
+            Controls.Add(layout);
             _parents.SelectionChanged += delegate { if (!_rendering) RenderDetails(); };
-            _details.CellDoubleClick += delegate { Guard(delegate { Highlight(SelectedRecords().SelectMany(r => new[] { r.Parent, r.Child })); }); };
+            _details.CellDoubleClick += delegate { Guard(delegate { Highlight(SelectedRecords()); }); };
             _search.TextChanged += delegate { RenderGroups(); };
-            _continuous.CheckedChanged += delegate { _selectionQueue.Clear(); _selectionError = null; if (_continuous.Checked) Guard(StartContinuous); };
-            _chain.CheckedChanged += delegate { if (!_chain.Checked && _draft.NextParents.Count > 0) { _draft.Clear(); RefreshDraft(); } };
+            _continuous.CheckedChanged += delegate
+            {
+                ClearSelectionQueue();
+                if (_continuous.Checked) ResetPickedHighlight();
+                if (_continuous.Checked && _draft.Parent == null)
+                {
+                    _continuous.Checked = false;
+                    _hint = ParentPickHint;
+                }
+            };
+            _highlightOnPick.CheckedChanged += delegate
+            {
+                if (_highlightOnPick.Checked)
+                {
+                    _highlightPending = true;
+                    _hint = "点选普通资产可查看同资产实例及直接承载关系。";
+                }
+                else ResetPickedHighlight();
+            };
+            _chain.CheckedChanged += delegate { if (!_chain.Checked && _draft.NextParents.Count > 0) { _draft.Clear(); _hint = ParentPickHint; RefreshDraft(); } };
             _nextParent.SelectionChangeCommitted += delegate { Guard(delegate {
                 var item = _nextParent.SelectedItem as EndpointItem; if (item == null) return;
-                _draft.ContinueFrom(item.Endpoint); _document.ClearSelection2(true); RefreshDraft(); _continuous.Checked = true;
+                _draft.ContinueFrom(item.Endpoint); _document.ClearSelection2(true); RefreshDraft();
                 _hint = "已接续父组件，可继续点选下一层子组件。";
             }); };
-            _timer.Tick += delegate { if (_busy) return; try { EnsureContext(); PollSelection(); RefreshSaveStatus(); }
-                catch (Exception ex) { _continuous.Checked = false; _state.Text = ex.Message; } };
+            _timer.Tick += delegate
+            {
+                if (_busy || (McpRunning != null && McpRunning())) return;
+                try
+                {
+                    if (_assetsIsolated && !IsCurrentContext()) RestoreAssetDisplay();
+                    if (_displayedRevision != _session.Revision && IsCurrentContext())
+                        RefreshRelations(_session.Current.Relations);
+                    if (Enabled && _continuous.Checked) PollSelection();
+                    else if (Enabled && _highlightOnPick.Checked && Control.MouseButtons == MouseButtons.None)
+                        RefreshPickedHighlight();
+                    else if (_hasAutomaticSelection && !IsCurrentContext()) ResetPickedHighlight();
+                    RefreshSaveStatus();
+                }
+                catch (Exception ex)
+                {
+                    _continuous.Checked = false;
+                    _hint = ex.Message;
+                    _state.Text = ex.Message;
+                }
+            };
             _selectionEvents = _document as DAssemblyDocEvents_Event;
-            if (_selectionEvents != null) _selectionEvents.NewSelectionNotify += SelectionChanged;
-            FormClosed += delegate { _timer.Dispose(); if (_selectionEvents != null) { try { _selectionEvents.NewSelectionNotify -= SelectionChanged; } catch { } } };
-            Guard(delegate { RefreshDraft(); RefreshRelations(true); }); _timer.Start();
+            if (_selectionEvents != null)
+            {
+                _selectionEvents.NewSelectionNotify += SelectionChanged;
+                _selectionEvents.ClearSelectionsNotify += SelectionChanged;
+                _selectionEvents.UserSelectionPostNotify += UserSelectionCompleted;
+            }
+            FormClosed += delegate
+            {
+                _timer.Dispose();
+                ResetPickedHighlight();
+                if (_assetsIsolated) RestoreAssetDisplay();
+                if (_selectionEvents != null)
+                {
+                    try
+                    {
+                        _selectionEvents.NewSelectionNotify -= SelectionChanged;
+                        _selectionEvents.ClearSelectionsNotify -= SelectionChanged;
+                        _selectionEvents.UserSelectionPostNotify -= UserSelectionCompleted;
+                    }
+                    catch (COMException) { }
+                }
+            };
+            RefreshDraft();
+            RefreshRelations(current.Relations);
+            _timer.Start();
         }
         private static DataGridView Grid(bool multi)
         {
@@ -105,97 +222,505 @@ namespace SolidWorksAssetExporter.AddIn
                 MultiSelect = multi, RowHeadersVisible = false, AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None, RowTemplate = { Height = 32 } };
         }
         private FlowLayoutPanel Bar() { return new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoScroll = true }; }
-        private Button Button(string text, Action action)
-        { var b = new Button { Text = text, AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 0) }; b.Click += delegate { Guard(action); }; return b; }
-        private void EnsureContext()
-        { if (!Equals(_app.ActiveDoc, _document) || _session.Current.ConfigurationId != _configurationId) throw new ValidationException("活动总装配或配置已切换，请关闭面板后重新打开。"); }
-        private void Guard(Action action)
+        private Button Button(string text, Action action, bool resetHighlight = true)
+        { var b = new Button { Text = text, AutoSize = true, Height = 30, Margin = new Padding(0, 0, 8, 0) }; b.Click += delegate { Guard(action, resetHighlight); }; return b; }
+        private bool IsCurrentContext()
         {
+            var active = _app.ActiveDoc as ModelDoc2;
+            var configuration = Equals(active, _document) ? _document.ConfigurationManager.ActiveConfiguration : null;
+            return configuration != null && configuration.GetID() == _configurationId;
+        }
+        private void EnsureContext()
+        {
+            if (!IsCurrentContext())
+                throw new ValidationException("活动总装配或配置已切换，请关闭面板后重新打开。");
+        }
+        private void Guard(Action action, bool resetHighlight = true)
+        {
+            if (McpRunning != null && McpRunning()) return;
             var previousBusy = _busy; _busy = true;
-            try { EnsureContext(); action(); }
+            try { EnsureContext(); if (resetHighlight) ResetPickedHighlight(); action(); }
             catch (Exception ex) { _continuous.Checked = false; MessageBox.Show(this, ex.Message, "承载关系", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
             finally { _busy = previousBusy; }
         }
-        private AssemblyExportPlan Plan()
-        { return new ExportPlanBuilder().Build(new AssemblyScanner().Scan(SwAssemblyRoot.FromActiveDocument(_app, new SwPluginMutationTracker(_app, true))), ProjectMeshFormat.Step, false); }
-        private Dictionary<string, ExportNode> SelectionIndex(AssemblyExportPlan plan)
+        private SwBindingEndpoints Endpoints() { return new SwBindingEndpoints(_app, _session); }
+
+        private List<Component2> CurrentSelection()
         {
-            return SwInstanceBindings.Flatten(plan.Roots).Where(n => n.Source is SwCadNode && n.Source.InstanceId != "root")
-                .ToDictionary(n => SwInstanceBindings.Context(((SwCadNode)n.Source).Component), StringComparer.Ordinal);
+            var selection = _document.SelectionManager as SelectionMgr;
+            if (selection == null) throw new ValidationException("无法读取 SOLIDWORKS 当前选择。");
+            return ManualSelection(selection).ToList();
         }
-        private List<BindingEndpoint> Selection(Dictionary<string, ExportNode> nodes)
+
+        private IEnumerable<Component2> ManualSelection(SelectionMgr selection)
         {
-            var manager = _document.SelectionManager as SelectionMgr;
-            if (manager == null) throw new ValidationException("无法读取当前选择。");
-            var result = new List<BindingEndpoint>();
-            for (var i = 1; i <= manager.GetSelectedObjectCount2(-1); i++)
-            {
-                var component = manager.GetSelectedObject6(i, -1) as Component2 ?? manager.GetSelectedObjectsComponent4(i, -1) as Component2;
-                if (component == null) throw new ValidationException("请选择可独立导出的 Asset 组件实例。");
-                ExportNode node; nodes.TryGetValue(SwInstanceBindings.Context(component), out node);
-                var e = _session.Capture(node); if (!result.Any(v => v.Context == e.Context)) result.Add(e);
-            }
-            return result;
+            return ManualSelectionIndices(selection)
+                .Select(index => SwBindingEndpoints.SelectedComponent(selection, index));
         }
+
+        private static IEnumerable<int> ManualSelectionIndices(SelectionMgr selection)
+        {
+            return Enumerable.Range(1, selection.GetSelectedObjectCount2(-1))
+                .Where(index => !SwBindingHighlight.IsAutomaticMark(selection.GetSelectedObjectMark(index)));
+        }
+
         private void CaptureParent()
         {
-            _continuous.Checked = false; _selectionNodes = SelectionIndex(Plan());
-            var selected = Selection(_selectionNodes); if (selected.Count != 1) throw new ValidationException("父组件必须恰好选择一个实例。");
-            _draft.SetParent(selected[0]); _draft.Children.RemoveAll(c => c.Context == selected[0].Context);
-            _document.ClearSelection2(true); RefreshDraft(); _continuous.Checked = true;
-            _hint = "可在模型中逐个点选子组件，自动累计；选一个子项可批量添加同级同款。";
+            var components = CurrentSelection();
+            if (components.Count == 0) throw new ValidationException(ParentPickHint);
+            var operation = Endpoints();
+            ExportNode parent = null;
+            foreach (var component in components)
+            {
+                var asset = operation.FindSelectedAsset(component);
+                if (parent != null && parent.Id != asset.Id)
+                    throw new ValidationException("请选择一个父资产实例。");
+                parent = asset;
+            }
+            var captured = operation.Capture(parent);
+            _draft.SetParent(captured);
+            _draft.Children.RemoveAll(child => child.Context == captured.Context);
+            ClearSelectionQueue();
+            _document.ClearSelection2(true);
+            RefreshDraft();
+            _hint = "父组件已选定。Ctrl 多选或框选子组件后，点击“添加所选子组件”。";
         }
-        private void StartContinuous()
+
+        private void AppendToSelectedParent()
         {
-            if (_draft.Parent == null) throw new ValidationException("请先选择父组件；链式多子分支请先选择下一父组件。");
-            _selectionNodes = SelectionIndex(Plan());
+            var group = SelectedGroup();
+            var records = _session.Current.Relations.Where(r => r.Parent.Context == group).ToList();
+            if (records.Count == 0) throw new ValidationException("请在已有关系列表中选择一个父组件。");
+            if (_draft.Parent != null && _draft.Parent.Context != group && _draft.Children.Count != 0)
+                throw new ValidationException("当前还有另一父组件的待绑定子项，请先应用绑定或清空本轮。");
+
+            var operation = Endpoints();
+            var parent = operation.Capture(operation.Resolve(records[0].Parent));
+            var selection = CurrentSelection();
+            var alreadyBound = new HashSet<string>(records.Select(r => r.Child.Context), StringComparer.Ordinal);
+            List<string> ignored;
+            var children = CaptureSelected(operation, selection, out ignored);
+            var additions = children.Where(child => child.Context != parent.Context && !alreadyBound.Contains(child.Context)).ToList();
+
+            _continuous.Checked = false;
+            _draft.SetParent(parent);
+            _draft.Children.RemoveAll(child => child.Context == parent.Context || alreadyBound.Contains(child.Context));
+            if (additions.Count > 0) Append(additions);
+            else RefreshDraft();
+            _hint = _draft.Children.Count > 0 ? "已选好新增子项，点击“应用绑定”提交。" :
+                "已读取已有父组件。请在 SOLIDWORKS 中选择新子项，再点击“添加所选子组件”。";
+            if (children.Count > additions.Count) _hint += " 已跳过已有子项或父组件本身。";
+            if (ignored.Count > 0) _hint += " " + ignored[0];
         }
+
         private int SelectionChanged()
         {
-            // Snapshot every selection event, including fast successive single clicks.
-            // Defer UI updates and ClearSelection2 until after the native callback returns.
-            if (_busy || !_continuous.Checked || !Enabled || _draft.Parent == null) return 0;
-            try { EnsureContext(); foreach (var e in Selection(_selectionNodes))
-                if (!_selectionQueue.Any(q => q.Context == e.Context)) _selectionQueue.Add(e); }
-            catch (Exception ex) { _selectionError = ex.Message; }
+            if (_busy || (McpRunning != null && McpRunning()) || !Enabled || !_continuous.Checked || _draft.Parent == null) return 0;
+            try
+            {
+                var selection = _document.SelectionManager as SelectionMgr;
+                // A completed multi-selection is read once on the timer. Single clicks can
+                // replace each other before then, so retain their component occurrences.
+                if (selection != null && ManualSelectionIndices(selection).Take(2).Count() == 1)
+                {
+                    var component = ManualSelection(selection).FirstOrDefault();
+                    if (component != null && _queuedSelectionNames.Add(component.Name2))
+                        _selectionQueue.Add(component);
+                }
+            }
+            catch (COMException) { }
             return 0;
         }
-        private void PollSelection()
+
+        private int UserSelectionCompleted()
         {
-            if (!_continuous.Checked || !Enabled || _draft.Parent == null) return;
-            var manager = _document.SelectionManager as SelectionMgr;
-            if (_selectionError != null) { _hint = _selectionError + " 连续点选已暂停。"; _selectionError = null; _continuous.Checked = false; return; }
-            if (_selectionQueue.Count == 0 && (manager == null || manager.GetSelectedObjectCount2(-1) == 0)) return;
+            if (!_busy && (McpRunning == null || !McpRunning()) && Enabled && !_continuous.Checked && _highlightOnPick.Checked)
+                _highlightPending = true;
+            return 0;
+        }
+
+        private void RefreshPickedHighlight()
+        {
+            if (!IsCurrentContext())
+            {
+                ResetPickedHighlight();
+                return;
+            }
+            var selection = _document.SelectionManager as SelectionMgr;
+            if (selection == null) return;
+            var picks = ReadManualPicks(selection);
+            var selectionKey = SelectionKey(picks);
+            if (!_highlightPending && selectionKey == _lastPickedSelection &&
+                (!_hasAutomaticSelection || SwBindingHighlight.HasSelection(selection)))
+                return;
+
             _busy = true;
-            try { var selected = _selectionQueue.Concat(Selection(_selectionNodes)).ToList(); _selectionQueue.Clear(); Append(selected); }
-            catch (ValidationException ex) { _continuous.Checked = false; _hint = ex.Message + " 连续点选已暂停。"; }
+            try
+            {
+                ResetPickedHighlight();
+                _lastPickedSelection = selectionKey;
+                if (picks.Count == 0) return;
+
+                var operation = Endpoints();
+                var assets = new List<ExportNode>();
+                var selectedIds = new HashSet<string>(StringComparer.Ordinal);
+                var normalize = false;
+                string ignored = null;
+                foreach (var pick in picks)
+                {
+                    try
+                    {
+                        var asset = operation.FindSelectedAsset(pick.Component);
+                        if (selectedIds.Add(asset.Id)) assets.Add(asset);
+                        else normalize = true;
+                        if (!pick.WholeComponent || pick.Name != asset.Name) normalize = true;
+                    }
+                    catch (ValidationException ex) { normalize = true; if (ignored == null) ignored = ex.Message; }
+                    catch (COMException) { normalize = true; if (ignored == null) ignored = "无法读取所选组件。"; }
+                }
+                if (normalize)
+                {
+                    _document.ClearSelection2(true);
+                    var selected = SwBindingHighlight.SelectMany(_document, selection, assets.Select(AssetComponent), 0);
+                    _lastPickedSelection = SelectionKey(ReadManualPicks(selection));
+                    if (selected != assets.Count)
+                    {
+                        _highlightHint = "有资产实例无法在图形区选中。";
+                        return;
+                    }
+                }
+                if (assets.Count == 1) HighlightPickedAsset(selection, operation, assets[0]);
+                if (ignored != null)
+                    _highlightHint = (_highlightHint == null ? string.Empty : _highlightHint + " ") + ignored;
+            }
             finally { _busy = false; }
         }
-        private void Append(List<BindingEndpoint> selected)
+
+        private static List<ManualPick> ReadManualPicks(SelectionMgr selection)
         {
-            if (selected.Count == 0) throw new ValidationException("请至少选择一个子组件。");
-            _draft.AddChildren(selected); _document.ClearSelection2(true); RefreshDraft();
-            _hint = "已累计 " + _draft.Children.Count + " 个子组件；可以继续添加或应用绑定。";
+            var picks = new List<ManualPick>();
+            foreach (var index in ManualSelectionIndices(selection))
+            {
+                var whole = selection.GetSelectedObject6(index, -1) as Component2;
+                var component = whole ?? SwBindingEndpoints.SelectedComponent(selection, index);
+                picks.Add(new ManualPick { Component = component, WholeComponent = whole != null,
+                    Name = component == null ? string.Empty : component.Name2 });
+            }
+            return picks;
         }
-        private void CaptureChildren() { Append(Selection(SelectionIndex(Plan()))); }
+
+        private static string SelectionKey(IEnumerable<ManualPick> picks)
+        {
+            return string.Join("\0", picks.Select(pick => (pick.WholeComponent ? "component:" : "entity:") + pick.Name));
+        }
+
+        private static Component2 AssetComponent(ExportNode asset) { return ((SwCadNode)asset.Source).Component; }
+
+        private void HighlightPickedAsset(SelectionMgr selection, SwBindingEndpoints operation, ExportNode asset)
+        {
+            var context = SwInstanceBindings.Context(AssetComponent(asset));
+            var relations = _relationsByEndpoint[context].ToList();
+            var parents = relations.Where(relation => relation.Child.Context == context).Select(relation => relation.Parent);
+            var children = relations.Where(relation => relation.Parent.Context == context).Select(relation => relation.Child);
+            _pickedRoles[context] = SwBindingHighlight.AssetMark;
+            var roles = new Dictionary<string, Component2>(StringComparer.Ordinal);
+            var parentCount = AddHighlightRole(operation, parents, SwBindingHighlight.ParentMark, roles);
+            var childCount = AddHighlightRole(operation, children, SwBindingHighlight.ChildMark, roles);
+
+            var sameAssetCount = 1;
+            var peers = new List<Component2>();
+            foreach (var occurrence in operation.SameAssetInstances(asset))
+            {
+                if (occurrence.Id == asset.Id) continue;
+                sameAssetCount++;
+                var component = AssetComponent(occurrence);
+                var occurrenceContext = SwInstanceBindings.Context(component);
+                if (_pickedRoles.ContainsKey(occurrenceContext)) continue;
+                _pickedRoles.Add(occurrenceContext, SwBindingHighlight.AssetMark);
+                peers.Add(component);
+            }
+            var highlighted = PaintHighlight(selection, roles, peers);
+            FollowPickedRelations(relations, context);
+            _highlightHint = "同资产 " + sameAssetCount + " 个，直接父级 " + parentCount + " 个，直接子级 " + childCount + " 个。";
+            var unavailable = peers.Count + parentCount + childCount - highlighted;
+            if (unavailable > 0) _highlightHint += " " + unavailable + " 个关联实例当前无法高亮。";
+        }
+
+        private int AddHighlightRole(SwBindingEndpoints operation, IEnumerable<BindingEndpoint> endpoints, int mark,
+            IDictionary<string, Component2> components)
+        {
+            var added = 0;
+            foreach (var group in endpoints.GroupBy(endpoint => endpoint.Context, StringComparer.Ordinal))
+            {
+                if (_pickedRoles.ContainsKey(group.Key)) continue;
+                _pickedRoles[group.Key] = mark;
+                components[group.Key] = ResolveHighlightComponent(operation, group);
+                added++;
+            }
+            return added;
+        }
+
+        private int PaintHighlight(SelectionMgr selection, IDictionary<string, Component2> roles, IEnumerable<Component2> peers)
+        {
+            var highlighted = SwBindingHighlight.SelectMany(_document, selection, peers, SwBindingHighlight.AssetMark);
+            foreach (var mark in new[] { SwBindingHighlight.ParentMark, SwBindingHighlight.ChildMark })
+                highlighted += SwBindingHighlight.SelectMany(_document, selection,
+                    roles.Where(pair => pair.Value != null && _pickedRoles[pair.Key] == mark).Select(pair => pair.Value), mark);
+            _hasAutomaticSelection = SwBindingHighlight.HasSelection(selection);
+            if (_hasAutomaticSelection)
+            {
+                SwBindingHighlight.ColorSelections(selection);
+                _document.GraphicsRedraw2();
+            }
+            return highlighted;
+        }
+
+
+        private void FollowPickedRelations(IList<InstanceBinding> relations, string endpointContext)
+        {
+            foreach (var relation in relations)
+            {
+                _pickedRelationIds.Add(relation.Id);
+                _pickedParentContexts.Add(relation.Parent.Context);
+            }
+
+            var parents = _parents.Rows.Cast<DataGridViewRow>()
+                .Where(row => _pickedParentContexts.Contains((string)row.Tag)).ToList();
+            var preferred = parents.FirstOrDefault(row => (string)row.Tag == endpointContext) ??
+                parents.FirstOrDefault(row => row.Selected) ?? parents.FirstOrDefault();
+            if (preferred != null && !preferred.Selected)
+            {
+                _rendering = true;
+                try
+                {
+                    _parents.ClearSelection();
+                    _parents.CurrentCell = preferred.Cells[0];
+                    preferred.Selected = true;
+                }
+                finally { _rendering = false; }
+                RenderDetails();
+            }
+            StylePickedRows();
+            var firstMatch = _details.Rows.Cast<DataGridViewRow>().FirstOrDefault(row =>
+                _pickedRelationIds.Contains(((RelationView)row.Tag).Record.Id));
+            if (firstMatch != null && !firstMatch.Displayed)
+                _details.FirstDisplayedScrollingRowIndex = firstMatch.Index;
+        }
+
+        private void StylePickedRows()
+        {
+            foreach (DataGridViewRow row in _parents.Rows)
+                StyleRole(row, (string)row.Tag);
+            foreach (DataGridViewRow row in _details.Rows)
+                StylePickedChild(row, (RelationView)row.Tag);
+        }
+
+        private void StylePickedChild(DataGridViewRow row, RelationView view)
+        {
+            StyleRole(row, view.Record.Child.Context);
+        }
+
+        private void StyleRole(DataGridViewRow row, string context)
+        {
+            int mark;
+            var active = _pickedRoles.TryGetValue(context, out mark);
+            var color = active ? RoleTint(mark) : Color.Empty;
+            row.DefaultCellStyle.BackColor = color;
+            row.DefaultCellStyle.SelectionBackColor = color;
+            row.DefaultCellStyle.SelectionForeColor = active ? SystemColors.WindowText : Color.Empty;
+        }
+
+        private Control RoleLegend(string text, int mark)
+        {
+            return new Label { Text = text, AutoSize = true, BackColor = RoleTint(mark),
+                Padding = new Padding(5, 2, 5, 2), Margin = new Padding(5, 1, 0, 0) };
+        }
+
+        private Color RoleTint(int mark)
+        {
+            var color = SwBindingHighlight.GetRoleColor(_app, mark);
+            return Color.FromArgb((color.R + 2 * 255) / 3, (color.G + 2 * 255) / 3, (color.B + 2 * 255) / 3);
+        }
+
+        private static Component2 ResolveHighlightComponent(SwBindingEndpoints operation, IEnumerable<BindingEndpoint> endpoints)
+        {
+            foreach (var endpoint in endpoints)
+            {
+                try
+                {
+                    return AssetComponent(operation.Resolve(endpoint));
+                }
+                catch (ValidationException) { }
+                catch (COMException) { }
+            }
+            return null;
+        }
+
+        private void ResetPickedHighlight()
+        {
+            _highlightPending = false;
+            _highlightHint = null;
+            _lastPickedSelection = null;
+            if (_pickedRoles.Count > 0 || _pickedRelationIds.Count > 0)
+            {
+                _pickedRoles.Clear();
+                _pickedRelationIds.Clear();
+                _pickedParentContexts.Clear();
+                StylePickedRows();
+            }
+            if (!_hasAutomaticSelection) return;
+            var wasBusy = _busy;
+            _busy = true;
+            try
+            {
+                var selection = _document.SelectionManager as SelectionMgr;
+                if (selection == null) return;
+                SwBindingHighlight.Clear(selection);
+                _hasAutomaticSelection = SwBindingHighlight.HasSelection(selection);
+            }
+            catch (COMException) { }
+            finally { _busy = wasBusy; }
+        }
+
+        private void ToggleAssetIsolation()
+        {
+            if (_assetsIsolated)
+            {
+                RestoreAssetDisplay();
+                _hint = "已恢复装配显示。";
+                return;
+            }
+
+            var operation = Endpoints();
+            var assets = operation.ReadVisualization().Assets.Select(AssetComponent).ToList();
+            if (assets.Count == 0) throw new ValidationException("当前配置没有可显示的普通资产。");
+            var selection = _document.SelectionManager as SelectionMgr;
+            if (selection == null) throw new ValidationException("无法读取 SOLIDWORKS 当前选择。");
+            List<string> ignored;
+            var previous = CaptureSelected(operation, ManualSelection(selection), out ignored);
+            var assembly = (AssemblyDoc)_document;
+            try
+            {
+                _document.ClearSelection2(true);
+                if (SwBindingHighlight.SelectMany(_document, selection, assets, 0) != assets.Count || !assembly.Isolate())
+                    throw new ValidationException("SOLIDWORKS 无法隔离当前配置的资产实例。");
+                _assetsIsolated = true;
+                assembly.SetIsolateVisibility((int)swIsolateVisibility_e.swIsolateVisibility_HIDDEN);
+                _assetIsolation.Text = "恢复全部组件";
+                _hint = "当前仅显示普通资产。";
+            }
+            catch
+            {
+                if (_assetsIsolated) RestoreAssetDisplay();
+                throw;
+            }
+            finally
+            {
+                _document.ClearSelection2(true);
+                SwBindingHighlight.SelectMany(_document, selection,
+                    previous.Select(endpoint => ResolveHighlightComponent(operation, new[] { endpoint })), 0);
+                _highlightPending = true;
+            }
+        }
+
+        private void RestoreAssetDisplay()
+        {
+            try { ((AssemblyDoc)_document).ExitIsolate(); }
+            catch (COMException) { }
+            _assetsIsolated = false;
+            _assetIsolation.Text = "仅显示普通资产";
+        }
+
+        private void ClearSelectionQueue()
+        {
+            _selectionQueue.Clear();
+            _queuedSelectionNames.Clear();
+        }
+
+        private void PollSelection()
+        {
+            if (_draft.Parent == null || (Control.MouseButtons & MouseButtons.Left) != 0) return;
+            var selection = _document.SelectionManager as SelectionMgr;
+            var count = selection == null ? 0 : selection.GetSelectedObjectCount2(-1);
+            if (count == 0 && _selectionQueue.Count == 0) return;
+            _busy = true;
+            try
+            {
+                EnsureContext();
+                var components = selection == null ? _selectionQueue.ToList() : _selectionQueue.Concat(ManualSelection(selection)).ToList();
+                ClearSelectionQueue();
+                CaptureChildren(components);
+            }
+            finally { _busy = false; }
+        }
+
+        private static List<BindingEndpoint> CaptureSelected(SwBindingEndpoints operation,
+            IEnumerable<Component2> components, out List<string> ignored)
+        {
+            ignored = new List<string>();
+            var componentNames = new HashSet<string>(StringComparer.Ordinal);
+            var assetIds = new HashSet<string>(StringComparer.Ordinal);
+            var selected = new List<BindingEndpoint>();
+            foreach (var component in components)
+            {
+                if (component == null)
+                {
+                    ignored.Add("选择中有对象不属于装配组件。");
+                    continue;
+                }
+                try
+                {
+                    if (!componentNames.Add(component.Name2)) continue;
+                    var asset = operation.FindSelectedAsset(component);
+                    if (assetIds.Add(asset.Id)) selected.Add(operation.Capture(asset));
+                }
+                catch (ValidationException ex) { ignored.Add(ex.Message); }
+                catch (COMException ex) { ignored.Add("无法读取组件实例：" + ex.Message); }
+            }
+            return selected;
+        }
+
+        private void Append(IList<BindingEndpoint> selected)
+        {
+            if (selected.Count == 0) throw new ValidationException("请至少选择一个普通子资产。");
+            _draft.AddChildren(selected);
+            ClearSelectionQueue();
+            _document.ClearSelection2(true);
+            RefreshDraft();
+            _hint = "已累计 " + _draft.Children.Count + " 个子组件。";
+        }
+
+        private void CaptureChildren()
+        {
+            var components = _selectionQueue.Concat(CurrentSelection()).ToList();
+            CaptureChildren(components);
+        }
+
+        private void CaptureChildren(List<Component2> components)
+        {
+            if (_draft.Parent == null) throw new ValidationException(ParentPickHint);
+            if (components.Count == 0) throw new ValidationException("请先在 SOLIDWORKS 中多选或框选子组件。");
+            List<string> ignored;
+            var children = CaptureSelected(Endpoints(), components, out ignored);
+            if (children.Count == 0) throw new ValidationException(ignored.FirstOrDefault() ?? "当前选择中没有可绑定的普通子资产。");
+            Append(children);
+            if (ignored.Count > 0) _hint += " 已跳过 " + ignored.Count + " 项：" + ignored[0];
+        }
+
         private void CaptureSiblings()
         {
-            var nodes = SelectionIndex(Plan()); var seeds = Selection(nodes);
+            if (_draft.Parent == null) throw new ValidationException(ParentPickHint);
+            var operation = Endpoints();
+            List<string> ignored;
+            var seeds = CaptureSelected(operation, CurrentSelection(), out ignored);
             if (seeds.Count == 0) seeds = _childList.SelectedItems.Cast<EndpointItem>().Select(i => i.Endpoint).ToList();
             if (seeds.Count == 0 && _draft.Children.Count > 0) seeds.Add(_draft.Children.Last());
-            if (seeds.Count == 0) throw new ValidationException("先点选一个子组件，或在待绑定清单中选中一个子项，再批量添加其同级同款实例。");
-            var matches = new List<BindingEndpoint>();
-            foreach (var node in nodes.Values.Where(n => n.Kind == ExportNodeKind.Asset))
-            {
-                var sw = (SwCadNode)node.Source;
-                var context = SwInstanceBindings.Context(sw.Component);
-                if (!seeds.Any(s => s.AssetId == node.AssetId && string.Equals(s.SourcePath, sw.SourcePath, StringComparison.OrdinalIgnoreCase) &&
-                    BindingEditorState.OwnerContext(s.Context) == BindingEditorState.OwnerContext(context))) continue;
-                var e = _session.Capture(node);
-                if (seeds.Any(s => BindingEditorState.SameSiblingAsset(s, e))) matches.Add(e);
-            }
-            Append(matches); _hint = "已将同一 CAD 父级中的同款实例加入清单，共 " + _draft.Children.Count + " 个。请核对后应用。";
+            if (seeds.Count == 0) throw new ValidationException(ignored.FirstOrDefault() ?? "请先选中一个子资产作为同级批量添加的起点。");
+            var matches = seeds.GroupBy(s => new { Owner = BindingEditorState.OwnerContext(s.Context), s.AssetId, s.SourcePath })
+                .SelectMany(g => operation.Siblings(g.First())).ToList();
+            Append(matches);
         }
+
         private void RefreshDraft()
         {
             _parentText.Text = _draft.Parent == null ? "" : Display(_draft.Parent);
@@ -208,12 +733,23 @@ namespace SolidWorksAssetExporter.AddIn
         {
             _session.RequireWritable();
             if (_draft.Parent == null || _draft.Children.Count == 0) throw new ValidationException("请选择一个父组件和至少一个子组件。");
-            var plan = Plan(); var records = _session.Current.Relations; var revision = _session.Revision;
-            var proposed = InstanceBindingRules.Apply(records, _draft.Parent, _draft.Children, e => _session.Resolve(e, plan), replace);
+            var records = _session.Current.Relations; var revision = _session.Revision;
+            var resolve = Endpoints().Resolve;
+            var proposed = InstanceBindingRules.Apply(records, _draft.Parent, _draft.Children, resolve, replace);
+            if (records.Select(r => r.Id).SequenceEqual(proposed.Select(r => r.Id)))
+            {
+                _hint = "这些父子关系已存在。";
+                RefreshRelations(records, resolve);
+                return;
+            }
+            var updateStamp = _document.GetUpdateStamp();
             if (!ConfirmBatch(records, replace, _draft.Parent, _draft.Children)) return;
+            if (_document.GetUpdateStamp() != updateStamp)
+                throw new ValidationException("装配在确认期间已改变，请重新应用绑定。");
+            var continuous = _continuous.Checked;
             CommitRelations(proposed, revision); _draft.Applied(_chain.Checked); _document.ClearSelection2(true); _continuous.Checked = false;
-            RefreshDraft(); RefreshRelations();
-            if (_draft.Parent != null) _continuous.Checked = true;
+            RefreshDraft(); RefreshRelations(proposed, resolve);
+            if (_draft.Parent != null) _continuous.Checked = continuous;
             _hint = _draft.NextParents.Count > 0 ? "已绑定。请从“下一父组件”选择一个已绑定子组件，继续下一层。" :
                 _draft.Parent != null ? "已绑定，子组件已接续为父组件。继续点选下一层子组件。" : "已绑定并清空本轮选择，可读取下一父组件。请保存总装配。";
         }
@@ -246,7 +782,7 @@ namespace SolidWorksAssetExporter.AddIn
         {
             var selected = SelectedRecords(); if (selected.Count != 1) throw new ValidationException("请选择一个已绑定子组件作为下一父组件。");
             _continuous.Checked = false; _draft.Clear(); _draft.SetParent(selected[0].Child); _chain.Checked = true;
-            _document.ClearSelection2(true); RefreshDraft(); _continuous.Checked = true; _hint = "已接续所选子组件，可继续绑定下一层。";
+            _document.ClearSelection2(true); RefreshDraft(); _hint = "已接续所选子组件，可继续绑定下一层。";
         }
         private void Unbind(bool wholeGroup)
         {
@@ -261,8 +797,9 @@ namespace SolidWorksAssetExporter.AddIn
             var current = _session.Current.Relations;
             if (MessageBox.Show(this, "解除所选 " + selected.Count + " 条关系？\n未选中的关系会保留。", "解除绑定", MessageBoxButtons.OKCancel) != DialogResult.OK) return;
             var ids = new HashSet<string>(selected.Select(r => r.Id));
-            CommitRelations(current.Where(r => !ids.Contains(r.Id)).ToList(), revision);
-            RefreshRelations();
+            var remaining = current.Where(r => !ids.Contains(r.Id)).ToList();
+            CommitRelations(remaining, revision);
+            RefreshRelations(remaining);
         }
         private void CommitRelations(List<InstanceBinding> proposed, long revision)
         {
@@ -270,94 +807,158 @@ namespace SolidWorksAssetExporter.AddIn
             if (_session.Revision != revision) throw new ValidationException("关系在确认期间已改变，请刷新后重试。");
             _session.Commit(proposed);
         }
-        private void Highlight(IEnumerable<BindingEndpoint> endpoints)
+        private void Highlight(IList<InstanceBinding> relations)
         {
-            _continuous.Checked = false; _document.ClearSelection2(true);
-            foreach (var e in endpoints.GroupBy(e => e.Context).Select(g => g.First()))
-                if (!_session.ResolveComponent(e).Select4(true, null, false)) throw new ValidationException("实例无法高亮：" + e.DisplayPath);
-            _hint = "已高亮，连续点选已暂停；继续添加时可重新勾选。";
+            _continuous.Checked = false;
+            _document.ClearSelection2(true);
+            var selection = _document.SelectionManager as SelectionMgr;
+            if (selection == null) throw new ValidationException("无法读取 SOLIDWORKS 当前选择。");
+            var operation = Endpoints();
+            var roles = new Dictionary<string, Component2>(StringComparer.Ordinal);
+            AddHighlightRole(operation, relations.Select(relation => relation.Parent), SwBindingHighlight.ParentMark, roles);
+            AddHighlightRole(operation, relations.Select(relation => relation.Child), SwBindingHighlight.ChildMark, roles);
+            var highlighted = PaintHighlight(selection, roles, Enumerable.Empty<Component2>());
+            _lastPickedSelection = string.Empty;
+            StylePickedRows();
+            _hint = "已高亮 " + highlighted + " 个承载关系实例。";
+            if (highlighted < roles.Count) _hint += " " + (roles.Count - highlighted) + " 个实例当前无法高亮。";
         }
         private void SaveAssembly()
         {
-            _session.RequireWritable();
-            int error = 0, warning = 0;
-            // Same document save path as Ctrl+S; binding storage commits only on native save events.
-            if (!_document.Save3(0, ref error, ref warning) || error != 0) throw new ValidationException("总装配保存未完成，错误码：" + error + "。" + _session.LastSaveError);
-            _session.RequireSaved();
-            _hint = _treeHint = "总装配已保存。导出前请重新分类预览。";
+            _session.Save(false);
+            _hint = "总装配已保存。导出前请重新分类预览。";
             RefreshSaveStatus();
         }
-        private void EditInterfaces()
+        private void ValidateRelations()
         {
-            _continuous.Checked = false;
-            var plan = Plan(); var endpoints = new List<BindingEndpoint>();
-            if (_draft.Parent != null) endpoints.Add(_draft.Parent); endpoints.AddRange(_draft.Children);
             var records = _session.Current.Relations;
-            if (endpoints.Count == 0) endpoints.AddRange(records.Where(r => r.Parent.Context == SelectedGroup()).SelectMany(r => new[] { r.Parent, r.Child }));
-            if (endpoints.Count == 0) endpoints.AddRange(Selection(SelectionIndex(plan)));
-            endpoints = endpoints.GroupBy(e => e.Context).Select(g => g.First()).ToList();
-            if (endpoints.Count == 0) throw new ValidationException("请先读取父/子组件、选择已有父组件组，或在 SW 中选中一个普通 Asset。");
-            var candidates = _draft.Parent == null ? Enumerable.Empty<InstanceBinding>() :
-                _draft.Children.Select(child => new InstanceBinding { Parent = _draft.Parent, Child = child });
-            ShowInterfaceEditor(plan, endpoints, candidates);
-        }
-        private void ShowInterfaceEditor(AssemblyExportPlan plan, IEnumerable<BindingEndpoint> endpoints, IEnumerable<InstanceBinding> candidates)
-        {
-            _continuous.Checked = false;
-            var childRelations = _session.Current.Relations.Concat(candidates).ToList();
-            var assets = new List<InterfaceAsset>();
-            foreach (var group in endpoints.GroupBy(e => e.Context).Select(g => g.First()).GroupBy(e => e.SourcePath, StringComparer.OrdinalIgnoreCase))
-            {
-                // Resolve every occurrence: a replaced/invalid child may not be hidden by source grouping.
-                var nodes = group.Select(e => _session.Resolve(e, plan)).ToList();
-                var asset = new InterfaceAsset { Endpoint = group.First(), Source = (SwCadNode)nodes[0].Source, InstanceCount = group.Count() };
-                var contexts = new HashSet<string>(group.Select(e => e.Context));
-                asset.Children.AddRange(childRelations.Where(r => contexts.Contains(r.Parent.Context)).Select(r => r.Child));
-                asset.Reload(); assets.Add(asset);
-            }
-            var names = new List<string>();
-            foreach (var n in SwInstanceBindings.Flatten(plan.Roots).Where(n => n.Kind == ExportNodeKind.Asset).GroupBy(n => ((SwCadNode)n.Source).SourcePath, StringComparer.OrdinalIgnoreCase).Select(g => g.First()))
-            {
-                var props = PropertyRules.Merge(n.Source.Model); string value;
-                foreach (var key in InterfaceEditRules.Fields.Take(2)) if (props.TryGetValue(key, out value)) names.AddRange(InterfaceEditRules.Split(value));
-            }
-            using (var editor = new InterfacePropertiesDialog(assets, names,
-                a => { EnsureContext(); _session.Resolve(a.Endpoint, Plan()); },
-                e => { var node = _session.Resolve(e, Plan()); string v; return node.Properties.TryGetValue(PropertyRules.ConnectionInterface, out v) ? v : ""; }))
-            {
-                editor.ShowDialog(this);
-                // Never keep a cached classification/version snapshot after editing shared source files.
-                _selectionNodes = null; RefreshRelations(editor.SavedAny);
-                if (_draft.Parent != null || _draft.Children.Count > 0 || _draft.NextParents.Count > 0)
-                {
-                    var fresh = Plan();
-                    _draft.RefreshEndpoints(e => _session.Capture(_session.Resolve(e, fresh)));
-                }
-                RefreshDraft();
-                _hint = editor.SavedAny ? "接口源文件已保存。请核对关系，保存总装配并重新分类预览。" : "接口编辑已关闭，绑定草稿保留。";
-                RefreshSaveStatus();
-            }
-        }
-        private void RefreshRelations(bool refreshTree = false)
-        {
-            AssemblyExportPlan plan = null; string planError = null;
-            try { plan = Plan(); } catch (ValidationException ex) { planError = "当前不可导出：" + ex.Message; }
-            _views = new List<RelationView>();
-            var cache = new Dictionary<string, ExportNode>(StringComparer.Ordinal);
-            Func<BindingEndpoint, ExportNode> resolve = e => { var key = e.Context + "|" + e.Reference + "|" + e.SourceIdentity + "|" + e.SourcePath;
-                ExportNode n; if (!cache.TryGetValue(key, out n)) { n = _session.Resolve(e, plan); cache.Add(key, n); } return n; };
-            foreach (var r in _session.Current.Relations)
-            {
-                var v = new RelationView { Record = r, Parent = Display(r.Parent), Child = Display(r.Child) };
-                try { if (plan == null) throw new ValidationException(planError); var p = resolve(r.Parent); var c = resolve(r.Child);
-                    v.Parent = Label(p.Source.InstancePath, p.AssetId); v.Child = Label(c.Source.InstancePath, c.AssetId); InstanceBindingRules.ValidateConnection(p, c); }
-                catch (ValidationException ex) { v.Error = ex.Message; }
-                _views.Add(v);
-            }
-            RenderGroups();
-            RefreshAssemblyTree(plan, planError, refreshTree);
+            if (records.Count > 0) RefreshRelations(records, Endpoints().Resolve);
+            _hint = records.Count == 0 ? "当前配置没有已有关系。" : "已有关系的端点与接口已检查。";
             RefreshSaveStatus();
         }
+
+        private void RefreshRelations(IList<InstanceBinding> records, Func<BindingEndpoint, ExportNode> resolve = null)
+        {
+            ResetPickedHighlight();
+            _displayedRevision = _session.Revision;
+            _relationsByEndpoint = BindingEditorState.IndexRelatedInstances(records);
+            _relationsValidated = resolve != null;
+            _views = new List<RelationView>();
+            foreach (var relation in records)
+            {
+                var view = new RelationView { Record = relation, Parent = Display(relation.Parent), Child = Display(relation.Child) };
+                if (resolve != null)
+                {
+                    var endpointsResolved = false;
+                    try
+                    {
+                        var parent = resolve(relation.Parent);
+                        var child = resolve(relation.Child);
+                        view.Parent = Label(parent.Source.InstancePath, parent.AssetId);
+                        view.Child = Label(child.Source.InstancePath, child.AssetId);
+                        view.ParentName = InstanceName(parent.Source.InstancePath);
+                        view.ChildName = InstanceName(child.Source.InstancePath);
+                        endpointsResolved = true;
+                        InstanceBindingRules.ValidateConnection(parent, child);
+                    }
+                    catch (ValidationException ex)
+                    {
+                        view.Error = ex.Message;
+                        view.InterfaceIssue = endpointsResolved;
+                    }
+                    catch (COMException ex) { view.Error = ex.Message; }
+                }
+                _views.Add(view);
+            }
+            var parentCount = records.Select(r => r.Parent.Context).Distinct(StringComparer.Ordinal).Count();
+            _totals.Text = "总关系 " + records.Count + " 条 · 涉及 " + _relationsByEndpoint.Count + " 个组件（" + parentCount + " 个父组件）";
+            var issues = _views.Where(v => v.InterfaceIssue).ToList();
+            _interfaceBanner.Visible = issues.Count > 0;
+            _interfaceSummary.Text = issues.Count == 1
+                ? "接口不兼容   父 " + issues[0].ParentName + " → 子 " + issues[0].ChildName
+                : issues.Count + " 条接口不兼容";
+            _interfaceIssues.Text = issues.Count == 1 ? "定位并查看原因" : "查看接口冲突";
+            RenderGroups();
+            RefreshSaveStatus();
+        }
+
+        private void ShowInterfaceIssues()
+        {
+            var issues = _views.Where(v => v.InterfaceIssue).ToList();
+            if (issues.Count == 0) return;
+            using (var dialog = new Form
+            {
+                Text = "接口不兼容 · " + issues.Count + " 条", Size = new Size(850, 420),
+                MinimumSize = new Size(630, 350), StartPosition = FormStartPosition.CenterParent, Font = Font,
+                MinimizeBox = false, ShowInTaskbar = false
+            })
+            {
+                var table = Grid(false);
+                table.Columns.Add("parent", "父组件");
+                table.Columns.Add("child", "子组件");
+                foreach (var issue in issues)
+                {
+                    var row = table.Rows[table.Rows.Add(issue.ParentName, issue.ChildName)];
+                    row.Tag = issue;
+                    row.Cells[0].ToolTipText = issue.Parent;
+                    row.Cells[1].ToolTipText = issue.Child;
+                }
+
+                var reason = new TextBox { Dock = DockStyle.Fill, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical };
+                var locate = new Button { Text = "定位所选关系", AutoSize = true, DialogResult = DialogResult.OK };
+                var close = new Button { Text = "关闭", AutoSize = true, DialogResult = DialogResult.Cancel };
+                var actions = Bar();
+                actions.Controls.Add(locate);
+                actions.Controls.Add(close);
+                var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(10) };
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+                layout.Controls.Add(table, 0, 0);
+                layout.Controls.Add(reason, 0, 1);
+                layout.Controls.Add(actions, 0, 2);
+                dialog.Controls.Add(layout);
+                dialog.AcceptButton = locate;
+                dialog.CancelButton = close;
+                Action showReason = () =>
+                {
+                    var selected = table.SelectedRows.Count == 0 ? null : (RelationView)table.SelectedRows[0].Tag;
+                    reason.Text = selected == null ? "" : selected.Error.Replace("\r\n", "\n").Replace("\n", "\r\n");
+                    locate.Enabled = selected != null;
+                };
+                table.SelectionChanged += delegate { showReason(); };
+                table.CurrentCell = table.Rows[0].Cells[0];
+                table.Rows[0].Selected = true;
+                showReason();
+                if (dialog.ShowDialog(this) == DialogResult.OK && table.SelectedRows.Count > 0)
+                    LocateInterfaceIssue((RelationView)table.SelectedRows[0].Tag);
+            }
+        }
+
+        private void LocateInterfaceIssue(RelationView issue)
+        {
+            if (!Matches(issue)) _search.Clear();
+            var parent = _parents.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => (string)row.Tag == issue.Record.Parent.Context);
+            if (parent == null) return;
+            _rendering = true;
+            try
+            {
+                _parents.ClearSelection();
+                _parents.CurrentCell = parent.Cells[0];
+                parent.Selected = true;
+            }
+            finally { _rendering = false; }
+            RenderDetails();
+            var child = _details.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => ((RelationView)row.Tag).Record.Id == issue.Record.Id);
+            if (child == null) return;
+            _details.CurrentCell = child.Cells[0];
+            child.Selected = true;
+            _details.Focus();
+            _highlightHint = null;
+            _hint = "接口不兼容：父 " + issue.ParentName + " → 子 " + issue.ChildName;
+            RefreshSaveStatus();
+        }
+
         private string SelectedGroup()
         { return _parents.SelectedRows.Count == 0 ? null : _parents.SelectedRows[0].Tag as string; }
         private bool Matches(RelationView v)
@@ -370,36 +971,58 @@ namespace SolidWorksAssetExporter.AddIn
             {
                 var row = _parents.Rows[_parents.Rows.Add(g.First().Parent, g.Count(), g.Any(v => v.Error != null) ? "需修复 " + g.Count(v => v.Error != null) : SavedState())];
                 row.Tag = g.First().Record.Parent.Context; row.Cells[0].ToolTipText = g.First().Parent;
+                if (g.Any(v => v.InterfaceIssue)) MarkInterfaceStatus(row.Cells[2]);
+                if (_pickedRoles.Count > 0) StyleRole(row, (string)row.Tag);
             }
             _parents.ClearSelection();
             var pick = _parents.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (string)r.Tag == selected) ?? _parents.Rows.Cast<DataGridViewRow>().FirstOrDefault();
             if (pick != null) { pick.Selected = true; _parents.CurrentCell = pick.Cells[0]; }
-            _rendering = false; _totals.Text = _views.Select(v => v.Record.Parent.Context).Distinct().Count() + " 个父组件 / " + _views.Count + " 条关系"; RenderDetails();
+            _rendering = false;
+            RenderDetails();
         }
         private void RenderDetails()
         {
             _details.Rows.Clear(); var group = SelectedGroup();
+            var parentsByChild = _views.Select(v => v.Record).ToLookup(r => r.Child.Context, r => r.Parent, StringComparer.Ordinal);
             foreach (var v in _views.Where(v => v.Record.Parent.Context == group && Matches(v)))
             {
-                var parents = BindingEditorState.Parents(_session.Current.Relations, v.Record.Child);
-                var row = _details.Rows[_details.Rows.Add(v.Child, parents.Count, v.Error ?? SavedState())]; row.Tag = v; row.Cells[0].ToolTipText = v.Child;
+                var parents = parentsByChild[v.Record.Child.Context].GroupBy(p => p.Context, StringComparer.Ordinal).Select(g => g.First()).ToArray();
+                var status = v.InterfaceIssue ? "接口不兼容" : v.Error ?? SavedState();
+                var row = _details.Rows[_details.Rows.Add(v.Child, parents.Length, status)]; row.Tag = v; row.Cells[0].ToolTipText = v.Child;
+                if (v.InterfaceIssue) MarkInterfaceStatus(row.Cells[2]);
+                if (_pickedRoles.Count > 0) StylePickedChild(row, v);
                 row.Cells[1].ToolTipText = string.Join(System.Environment.NewLine, parents.Select(Display)); row.Cells[2].ToolTipText = v.Error;
             }
             _details.ClearSelection();
         }
-        private string SavedState() { return _session.Pending ? "待保存" : "有效"; }
+        private static void MarkInterfaceStatus(DataGridViewCell cell)
+        {
+            cell.Style.ForeColor = Color.DarkRed;
+            cell.Style.BackColor = Color.MistyRose;
+            cell.Style.SelectionBackColor = Color.DarkRed;
+            cell.Style.SelectionForeColor = Color.White;
+        }
+        private string SavedState() { return _session.Pending ? "待保存" : (_relationsValidated ? "有效" : "已保存"); }
         private void RefreshSaveStatus()
         {
             var status = SavedState();
-            foreach (DataGridViewRow row in _parents.Rows) if (!((string)row.Cells[2].Value).StartsWith("需修复") && (string)row.Cells[2].Value != status) row.Cells[2].Value = status;
-            foreach (DataGridViewRow row in _details.Rows) if (((RelationView)row.Tag).Error == null && (string)row.Cells[2].Value != status) row.Cells[2].Value = status;
-            _state.Text = (_session.Pending ? "已应用，待保存总装配。" : "当前关系已保存。") + (_session.LastSaveError ?? "") + "\r\n" + _hint +
-                "\r\n未绑定不表示已确认空；修改后请保存并重新分类预览。";
-            RefreshTreeSaveStatus();
+            if (status != _displayedSavedState)
+            {
+                foreach (DataGridViewRow row in _parents.Rows) if (!((string)row.Cells[2].Value).StartsWith("需修复") && (string)row.Cells[2].Value != status) row.Cells[2].Value = status;
+                foreach (DataGridViewRow row in _details.Rows) if (((RelationView)row.Tag).Error == null && (string)row.Cells[2].Value != status) row.Cells[2].Value = status;
+                _displayedSavedState = status;
+            }
+            var instructions = _highlightOnPick.Checked && _continuous.Checked
+                ? "取消“连续点选子组件”即可恢复自动高亮。"
+                : "未绑定不表示已确认空；修改后请保存并重新分类预览。";
+            _state.Text = (_session.Pending ? "已应用，待保存总装配。" : "当前关系已保存。") + (_session.LastSaveError ?? "") + "\r\n" +
+                (_highlightHint ?? _hint) + "\r\n" + instructions;
         }
-        private static string Label(string path, string assetId) { return (path ?? "").Split('/').LastOrDefault() + " | " + assetId + " | " + path; }
+        private static string InstanceName(string path) { return (path ?? "").Split('/').LastOrDefault(); }
+        private static string Label(string path, string assetId) { return InstanceName(path) + " | " + assetId + " | " + path; }
         private static string Display(BindingEndpoint e) { return Label(e.DisplayPath, e.AssetId); }
         private sealed class EndpointItem { public EndpointItem(BindingEndpoint e) { Endpoint = e; } public BindingEndpoint Endpoint; public override string ToString() { return Display(Endpoint); } }
-        private sealed class RelationView { public InstanceBinding Record; public string Parent, Child, Error; }
+        private sealed class ManualPick { public Component2 Component; public string Name; public bool WholeComponent; }
+        private sealed class RelationView { public InstanceBinding Record; public string Parent, Child, ParentName, ChildName, Error; public bool InterfaceIssue; }
     }
 }

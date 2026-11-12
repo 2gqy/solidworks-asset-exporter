@@ -26,6 +26,7 @@ namespace SolidWorksAssetExporter.Core
         public const string IsQuickChangerRack = "is_quick_changer_rack";
         public const string ConnectionInterface = "connection_interface";
         public const string AcceptsInterfaces = "accepts_interfaces";
+        public const string SlotsNum = "slots_num";
         public const string IsAdjustable = "is_adjustable";
         public const string HasQrCode = "has_QRcode";
 
@@ -133,6 +134,10 @@ namespace SolidWorksAssetExporter.Core
                 issues.Add("[class]=robot 不能同时标记为 Tool、Fixture、快换盘或快换架。");
 
             ValidateInterfaceList(issues, AcceptsInterfaces, accepts);
+            var slots = ReadTrimmed(properties, SlotsNum);
+            int capacity;
+            if (slots.Length != 0 && !int.TryParse(slots, NumberStyles.None, CultureInfo.InvariantCulture, out capacity))
+                issues.Add("属性 [slots_num] 必须为非负整数。");
             if (connection.IndexOf(';') >= 0 || connection.IndexOf('；') >= 0)
                 issues.Add("属性 [connection_interface] 只能填写一个接口；多个可接受接口请填写到 [accepts_interfaces]。");
             return issues;
@@ -244,7 +249,7 @@ namespace SolidWorksAssetExporter.Core
 
         public static bool ReadIsWorkstation(IDictionary<string, string> properties, DocumentKind kind)
         {
-            if (kind != DocumentKind.Assembly || properties == null) return false;
+            if (kind != DocumentKind.Assembly || properties == null || ReadIsAsset(properties)) return false;
             string value, legacy;
             var hasValue = properties.TryGetValue(IsWorkstation, out value);
             var hasLegacy = properties.TryGetValue(LegacyIsWorkstation, out legacy);
@@ -326,13 +331,22 @@ namespace SolidWorksAssetExporter.Core
 
         public static int RequirePositiveInteger(IDictionary<string, string> properties, string key, string modelName)
         {
-            string raw;
             int value;
-            if (properties == null || !properties.TryGetValue(key, out raw) ||
-                !int.TryParse((raw ?? string.Empty).Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out value) || value <= 0)
+            if (!TryReadPositiveInteger(properties, key, out value))
                 throw new ValidationException(string.Format(CultureInfo.InvariantCulture,
                     "模型 [{0}] 必须设置正整数属性 [{1}]。", modelName, key));
             return value;
+        }
+
+        public static bool TryReadPositiveInteger(IDictionary<string, string> properties, string key, out int value)
+        {
+            return int.TryParse(ReadTrimmed(properties, key), NumberStyles.None, CultureInfo.InvariantCulture, out value) && value > 0;
+        }
+
+        public static int ReadManagedVersion(IDictionary<string, string> properties, string key)
+        {
+            int value;
+            return TryReadPositiveInteger(properties, key, out value) ? value : 1;
         }
     }
 
@@ -352,6 +366,11 @@ namespace SolidWorksAssetExporter.Core
         public static void ValidateExportable(ModelDescriptor model)
         {
             ValidateClassifiable(model);
+            RequireCreationTime(model);
+        }
+
+        private static void RequireCreationTime(ModelDescriptor model)
+        {
             if (string.IsNullOrWhiteSpace(model.InternalCreationTime))
                 throw new ValidationException("模型 [" + model.FileName + "] 缺少 SOLIDWORKS 内部创建时间。");
         }
@@ -362,7 +381,9 @@ namespace SolidWorksAssetExporter.Core
         public static readonly Guid UrlNamespace = new Guid("6ba7b811-9dad-11d1-80b4-00c04fd430c8");
         private const string AssetPrefix = "urn:solidworks-asset-export:v2:";
         private const string AssemblyPrefix = "urn:solidworks-project-assembly:v1:";
-        private const string ProjectUnitPrefix = "urn:solidworks-project-unit:v1:";
+        private const string AssemblyPathPrefix = "urn:solidworks-project-assembly:path:v1:";
+        private const string ProjectPathPrefix = "urn:solidworks-project-unit:path:v1:";
+        private const string VirtualProjectUnitPrefix = "urn:solidworks-project-unit:virtual:v1:";
         private const string NodePrefix = "urn:solidworks-export-node:v1:";
         // Public wire protocol: docs/ROBOT_ASSET_REFERENCE_PROTOCOL.md.
         public const string RobotPrefix = "urn:solidworks-robot:v1:";
@@ -414,12 +435,28 @@ namespace SolidWorksAssetExporter.Core
 
         public static Guid AssemblyUuid(ModelDescriptor model)
         {
-            return Uuid5.Create(UrlNamespace, AssemblyPrefix + ModelSeed(model));
+            var seed = ModelSeed(model);
+            return string.IsNullOrWhiteSpace(model.InternalCreationTime)
+                ? Uuid5.Create(UrlNamespace, AssemblyPathPrefix + Canonical.Join(model.FullPath, seed))
+                : Uuid5.Create(UrlNamespace, AssemblyPrefix + seed);
         }
 
         public static Guid ProjectUnitUuid(Guid assemblyUuid, ModelDescriptor model)
         {
-            return Uuid5.Create(UrlNamespace, ProjectUnitPrefix + Canonical.Join(assemblyUuid.ToString("D"), ModelSeed(model)));
+            if (model == null) throw new ArgumentNullException("model");
+            return Uuid5.Create(UrlNamespace, ProjectPathPrefix + Canonical.Join(assemblyUuid.ToString("D"),
+                model.FullPath, model.Configuration, model.DisplayState, model.DocumentKind.ToString()));
+        }
+
+        internal static Guid ProjectUnitUuid(Guid assemblyUuid, ModelDescriptor model, string instancePath)
+        {
+            ModelRules.ValidateClassifiable(model);
+            if (!model.IsVirtualComponent || string.IsNullOrWhiteSpace(instancePath))
+                return ProjectUnitUuid(assemblyUuid, model);
+
+            // Keep virtual geometry independent of SOLIDWORKS' session cache path.
+            var seed = Canonical.Join(model.FileName, string.Empty, model.Configuration, model.DisplayState, model.DocumentKind.ToString());
+            return Uuid5.Create(UrlNamespace, VirtualProjectUnitPrefix + Canonical.Join(assemblyUuid.ToString("D"), instancePath, seed));
         }
 
         public static Guid ExportNodeUuid(Guid assemblyUuid, string instancePath)

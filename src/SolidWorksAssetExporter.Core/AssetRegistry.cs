@@ -96,7 +96,7 @@ namespace SolidWorksAssetExporter.Core
                 Kind = AssetVersionDecisionKind.UpgradeRequired,
                 CanExport = false,
                 RegisteredVersion = maximumVersion,
-                SuggestedVersion = maximumVersion + 1
+                SuggestedVersion = maximumVersion == int.MaxValue ? (int?)null : maximumVersion + 1
             };
         }
     }

@@ -29,13 +29,39 @@ namespace SolidWorksAssetExporter.Core.Tests
                 var changed = InterfaceEditRules.Changes(s, "", new[] { "old", "tip" }, 2, false); Equal("2", changed["asset_version"]);
                 True(!InterfaceEditRules.Changes(s, "", new[] { "old", "tip" }, 1, true).ContainsKey("asset_version"));
                 Throws<ValidationException>(() => InterfaceEditRules.Changes(s, "", new[] { "tip" }, 0, true));
-                Equal(0, InterfaceEditRules.Changes(s, "", new[] { "old" }, 99, false).Count);
+                Equal(0, InterfaceEditRules.Changes(s, "", new[] { "old" }, 1, false).Count);
+            });
+            Run("Version-only edits save without rewriting interface properties", delegate {
+                var target = new InterfaceTargetFake();
+                target.State.Raw[PropertyRules.AcceptsInterfaces] = " old ";
+                target.State.Values[PropertyRules.AcceptsInterfaces] = " old ";
+                var before = target.Read();
+                var increase = InterfaceEditRules.Changes(before, "", new[] { "old" }, 3, false);
+                Equal(1, increase.Count);
+                InterfacePropertyWriter.Apply(target, before, increase);
+                Equal(3, target.State.Version);
+                Equal(" old ", target.State.Raw[PropertyRules.AcceptsInterfaces]);
+                var raised = target.Read();
+                Throws<ValidationException>(() => InterfaceEditRules.Changes(raised, "", new[] { "old" }, 2, false));
+                var correction = InterfaceEditRules.Changes(raised, "", new[] { "old" }, 2, true);
+                InterfacePropertyWriter.Apply(target, raised, correction);
+                Equal(2, target.State.Version);
+                Equal(2, target.Saves);
+            });
+            Run("Interface editing checks the exact asset version in the published registry", delegate {
+                var uuid = "aaaaaaaa-aaaa-5aaa-8aaa-aaaaaaaaaaaa";
+                var registered = new[] { new AssetRegistration { Uuid = uuid, Version = 1 },
+                    new AssetRegistration { Uuid = uuid, Version = 3 },
+                    new AssetRegistration { Uuid = "bbbbbbbb-bbbb-5bbb-8bbb-bbbbbbbbbbbb", Version = 2 } };
+                Equal((int?)4, InterfaceEditRules.NextVersionIfPublished(registered, uuid, 1));
+                Equal((int?)null, InterfaceEditRules.NextVersionIfPublished(registered, uuid, 2));
+                Equal((int?)null, InterfaceEditRules.NextVersionIfPublished(registered, uuid, 4));
             });
             Run("Interface editor preserves role validation and blocks linked fields", delegate {
                 var s = InterfaceSnapshot();
                 Equal("", InterfaceEditRules.Changes(s, "", new string[0], 2, false)[PropertyRules.AcceptsInterfaces]);
                 var tool = InterfaceSnapshot(); tool.Values[PropertyRules.IsTool] = "1";
-                Throws<ValidationException>(() => InterfaceEditRules.Changes(tool, "", new[] { "old" }, 2, false));
+                Throws<ValidationException>(() => InterfaceEditRules.Changes(tool, "", new[] { "new" }, 2, false));
                 s.Linked.Add("accepts_interfaces"); Throws<ValidationException>(() => InterfaceEditRules.Changes(s, "", new[] { "tip" }, 2, false));
                 Throws<ValidationException>(() => InterfaceEditRules.Changes(InterfaceSnapshot(), "x;y", new[] { "old" }, 2, false));
             });
@@ -58,6 +84,42 @@ namespace SolidWorksAssetExporter.Core.Tests
                 var t = new InterfaceTargetFake { State = s, FailSave = true };
                 Throws<ValidationException>(() => InterfacePropertyWriter.Apply(t, s, new Dictionary<string, string> { { "connection_interface", "new" } }));
                 True(!t.State.Raw.ContainsKey("connection_interface"));
+            });
+            Run("Managed slot capacity is saved with the asset version and preserved when omitted", delegate {
+                var target = new InterfaceTargetFake();
+                var before = target.Read();
+                Throws<ValidationException>(() => InterfaceEditRules.Changes(before, "", new[] { "old" }, -1, 2, false));
+                var changes = InterfaceEditRules.Changes(before, "", new[] { "old" }, 24, 2, false);
+                InterfacePropertyWriter.Apply(target, before, changes);
+                Equal("24", target.State.Get(PropertyRules.SlotsNum));
+                Equal(2, target.State.Version);
+                Equal(1, target.Saves);
+                True(!InterfaceEditRules.Changes(target.Read(), "", new[] { "old", "tip" }, 3, false)
+                    .ContainsKey(PropertyRules.SlotsNum));
+                Equal(0, InterfaceEditRules.Changes(target.Read(), "", new[] { "old" }, 24, 2, true).Count);
+            });
+            Run("Plugin initializes legacy managed versions and repairs an explicitly supplied interface list", delegate {
+                var snapshot = InterfaceSnapshot();
+                snapshot.Values[PropertyRules.AssetVersion] = "legacy";
+                snapshot.Values[PropertyRules.AcceptsInterfaces] = "old；tip";
+                Equal(1, snapshot.Version);
+                Equal("1", InterfaceEditRules.VersionChanges(snapshot, 1)[PropertyRules.AssetVersion]);
+                Equal("1", InterfaceEditRules.VersionChanges(snapshot, 1, PropertyRules.AssemblyVersion)[PropertyRules.AssemblyVersion]);
+                var changes = InterfaceEditRules.Changes(snapshot, null, new[] { "old", "tip" }, null, 1, true);
+                Equal("old;tip", changes[PropertyRules.AcceptsInterfaces]);
+                Equal("1", changes[PropertyRules.AssetVersion]);
+                True(!changes.ContainsKey(PropertyRules.ConnectionInterface));
+            });
+            Run("Changing the root assembly package version preserves published asset semantics", delegate {
+                var published = new Dictionary<string, string>
+                {
+                    { PropertyRules.AssetVersion, "1" }, { PropertyRules.AssemblyVersion, "1" }, { PropertyRules.SlotsNum, "24" }
+                };
+                var current = new Dictionary<string, string>(published);
+                current[PropertyRules.AssemblyVersion] = "2";
+                Equal(0, ExportCoordinator.RegisteredPropertyDifferences(published, current).Count);
+                current[PropertyRules.SlotsNum] = "16";
+                True(ExportCoordinator.RegisteredPropertyDifferences(published, current).Single().StartsWith(PropertyRules.SlotsNum));
             });
             Run("Interface catalogue merges persistently and never overwrites corrupted input", delegate {
                 var folder = Path.Combine(Path.GetTempPath(), "interface-catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(folder);

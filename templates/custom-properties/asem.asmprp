@@ -14,7 +14,7 @@
           </Item>
         </Data>
       </Control>
-      <Control Label="装配包版本（assembly_version）" PropName="assembly_version" ApplyTo="Global" Type="NumericCtrl" ReadOnly="False" DefaultValue="1" />
+      <Control Label="装配包版本（插件维护）" PropName="assembly_version" ApplyTo="Global" Type="TextBox" ReadOnly="True" DefaultValue="" Mode="Text" />
       <Control Label="装配名称" PropName="装配名称" ApplyTo="Global" Type="TextBox" ReadOnly="False" DefaultValue="SW-Title" Mode="SWProperty" />
       <Control Label="装配版本" PropName="装配版本" ApplyTo="Global" Type="ComboBox" ReadOnly="False" UserDefineable="True">
         <Data Path="" SourceType="List">
@@ -44,7 +44,9 @@
       <Control Label="class" PropName="class" ApplyTo="Global" Type="RadioButton" ReadOnly="False">
         <Data>
           <Item Label="movable" PropValue="movable" />
-          <Item Label="robot" PropValue="robot" />
+          <Item Label="robot" PropValue="robot">
+            <ChildControl PropName="asset_version" Visibility="IsChecked=true" />
+          </Item>
           <Item Label="station" PropValue="station" />
           <Item Label="structure" PropValue="structure" />
         </Data>
@@ -54,9 +56,8 @@
       </Control>
       <Control Label="is_fixture" PropName="is_fixture" ApplyTo="Global" Type="CheckBox" ReadOnly="False" DefaultValue="0" PropValueChecked="1" PropValueUnchecked="0">
         <ChildControl PropName="accepts_interfaces" Visibility="IsChecked=true" />
-        <ChildControl PropName="slots_num" Visibility="IsChecked=true" />
       </Control>
-      <Control Label="slots_num" PropName="slots_num" ApplyTo="Global" Type="NumericCtrl" ReadOnly="False" DefaultValue="0" />
+      <Control Label="槽位总数（插件维护）" PropName="slots_num" ApplyTo="Global" Type="TextBox" ReadOnly="True" DefaultValue="" Mode="Text" />
       <Control Label="is_quick_changer" PropName="is_quick_changer" ApplyTo="Global" Type="CheckBox" ReadOnly="False" DefaultValue="0" PropValueChecked="1" PropValueUnchecked="0">
         <ChildControl PropName="accepts_interfaces" Visibility="IsChecked=true" />
         <ChildControl PropName="connection_interface" Visibility="IsChecked=true" />
@@ -82,7 +83,7 @@
       <Control Label="QR_size" PropName="QR_size" ApplyTo="Global" Type="TextBox" ReadOnly="False" DefaultValue="" Mode="Text" />
       <Control Label="QR_spacing" PropName="QR_spacing" ApplyTo="Global" Type="NumericCtrl" ReadOnly="False" DefaultValue="0" />
       <Control Label="is_adjustable" PropName="is_adjustable" ApplyTo="Global" Type="CheckBox" ReadOnly="False" DefaultValue="0" PropValueChecked="1" PropValueUnchecked="0" />
-      <Control Label="资产版本（asset_version）" PropName="asset_version" ApplyTo="Global" Type="NumericCtrl" ReadOnly="False" DefaultValue="1" />
+      <Control Label="Robot 外部引用版本（asset_version）" PropName="asset_version" ApplyTo="Global" Type="NumericCtrl" ReadOnly="False" DefaultValue="1" />
       <Control Label="设计原理" PropName="设计原理" ApplyTo="Global" Type="TextBox" ReadOnly="False" DefaultValue="" Mode="Text" />
       <Control Label="设计目的" PropName="设计目的" ApplyTo="Global" Type="TextBox" ReadOnly="False" DefaultValue="" Mode="Text" />
       <Control Label="升版说明" PropName="升版说明" ApplyTo="Global" Type="TextBox" ReadOnly="False" DefaultValue="" Mode="Text" />

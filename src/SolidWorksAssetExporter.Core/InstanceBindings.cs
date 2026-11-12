@@ -154,36 +154,49 @@ namespace SolidWorksAssetExporter.Core
                     var c = RequireAsset(resolve(child));
                     var old = proposed.Where(r => RequireAsset(resolve(r.Child)).Id == c.Id).ToList();
                     var sameParent = old.Where(r => RequireAsset(resolve(r.Parent)).Id == p.Id).ToList();
+                    var removed = replaceParent ? old.Except(sameParent).ToList() : null;
                     // Normal apply adds an edge; only the explicitly labelled replace action
                     // removes other parents. Retain an existing target edge and its stable ID.
-                    if (replaceParent) foreach (var r in old.Except(sameParent)) proposed.Remove(r);
+                    if (sameParent.Count == 0 || (removed != null && removed.Count > 0))
+                        ValidateConnection(p, c);
+                    if (removed != null) foreach (var r in removed) proposed.Remove(r);
                     if (sameParent.Count > 0) continue;
                     proposed.Add(new InstanceBinding { Parent = parent, Child = child });
                 }
                 catch (ValidationException ex) { errors.Add(ex.Message); }
             }
-            // Validate the entire proposed graph before the caller commits any records.
-            try { Resolve(proposed, resolve, null); }
+            // Check the full topology, including retained edges with interface issues.
+            // Their current compatibility is reported by the editor after the commit.
+            var uniqueRecords = new List<InstanceBinding>();
+            try { Resolve(proposed, resolve, null, uniqueRecords, false); }
             catch (ValidationException ex) { errors.Add(ex.Message); }
             if (errors.Count != 0) throw new ValidationException(string.Join(Environment.NewLine, errors.Distinct()));
-            return proposed;
+            return uniqueRecords;
         }
 
         public static AssemblyRelations Resolve(IEnumerable<InstanceBinding> records, Func<BindingEndpoint, ExportNode> resolve, AssemblyExportPlan plan)
+        { return Resolve(records, resolve, plan, null, true); }
+
+        private static AssemblyRelations Resolve(IEnumerable<InstanceBinding> records,
+            Func<BindingEndpoint, ExportNode> resolve, AssemblyExportPlan plan, ICollection<InstanceBinding> uniqueRecords,
+            bool validateConnections)
         {
             var result = new AssemblyRelations { AssemblyUuid = plan == null ? null : plan.AssemblyUuid, AssemblyVersion = plan == null ? 0 : plan.AssemblyVersion };
             var errors = new List<string>();
+            var pairs = new HashSet<Tuple<string, string>>();
             foreach (var r in records)
             {
                 try
                 {
                     if (r == null) throw new ValidationException("承载记录为空。");
                     var p = RequireAsset(resolve(r.Parent)); var c = RequireAsset(resolve(r.Child));
-                    ValidateConnection(p, c);
+                    if (!pairs.Add(Tuple.Create(p.Id, c.Id))) continue;
+                    if (validateConnections) ValidateConnection(p, c);
                     // Source.WorldTransform is in the top-level assembly coordinate system (SW Transform2).
                     var pose = RelationPose.From(Pose.FromTransform(p.Source.WorldTransform.InverseRigid().Multiply(c.Source.WorldTransform)));
                     pose.Validate();
                     result.Relations.Add(new AssemblyRelation { ParentNodeId = p.Id, ChildNodeId = c.Id, Pose = pose });
+                    if (uniqueRecords != null) uniqueRecords.Add(r);
                 }
                 catch (ValidationException ex) { errors.Add((r == null ? "记录" : r.Id) + ": " + ex.Message); }
             }
@@ -236,10 +249,15 @@ namespace SolidWorksAssetExporter.Core
                 .Concat(PropertyRules.ValidateAssetConnectionProperties(c).Select(s => child.Name + ": " + s)).ToList();
             var accepts = Read(p, PropertyRules.AcceptsInterfaces).Split(';').Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
             var connection = Read(c, PropertyRules.ConnectionInterface);
+            var pr = PropertyRules.DescribeAssetConnectionRole(p); var cr = PropertyRules.DescribeAssetConnectionRole(c);
+            var matchesInterface = cr == "Tool"
+                ? accepts.Select(CanonicalToolInterface).Contains(CanonicalToolInterface(connection), StringComparer.Ordinal)
+                : accepts.Contains(connection, StringComparer.Ordinal);
             if (accepts.Count == 0) issues.Add(parent.Name + ": accepts_interfaces 不能为空。");
             if (connection.Length == 0) issues.Add(child.Name + ": connection_interface 不能为空。");
-            else if (!accepts.Contains(connection, StringComparer.Ordinal)) issues.Add(parent.Name + " → " + child.Name + ": 接口不兼容。");
-            var pr = PropertyRules.DescribeAssetConnectionRole(p); var cr = PropertyRules.DescribeAssetConnectionRole(c);
+            else if (accepts.Count > 0 && !matchesInterface)
+                issues.Add(parent.Name + " → " + child.Name + "：接口不兼容。子组件接口 [" + connection +
+                    "]，父组件可接受 [" + string.Join("；", accepts) + "]。");
             // A rack may support either a tool-side changer or a tool directly.
             // Every edge still requires matching interfaces, including shared children.
             if (pr == "快换盘-机器人端" && cr != "快换盘-工具端" ||
@@ -249,6 +267,12 @@ namespace SolidWorksAssetExporter.Core
                 issues.Add(parent.Name + " → " + child.Name + ": 协议禁止的角色链 " + pr + " → " + cr + "。");
             if (issues.Count > 0) throw new ValidationException(string.Join("\n", issues));
         }
+
+        private static string CanonicalToolInterface(string name)
+        {
+            return name == "工具安装.移液器" ? "移液器" : name;
+        }
+
         private static string Read(IDictionary<string, string> p, string key)
         { string v; return p != null && p.TryGetValue(key, out v) ? (v ?? "").Trim() : ""; }
     }

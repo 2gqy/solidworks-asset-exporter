@@ -15,7 +15,7 @@ $userKey = 'Registry::HKEY_CURRENT_USER\Software\Classes\CLSID\' + $clsid + '\In
 if (-not (Test-Path -LiteralPath $userKey)) { throw 'This update requires an existing per-user COM registration. Use Install.cmd for a first install.' }
 $install = Join-Path $env:LOCALAPPDATA 'SolidWorksAssetExporter\Addin'
 $backup = Join-Path $env:LOCALAPPDATA ('SolidWorksAssetExporter\UpdateBackups\' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-$files = @('SolidWorksAssetExporter.AddIn.dll','SolidWorksAssetExporter.Core.dll','SolidWorks.Interop.sldworks.dll','SolidWorks.Interop.swconst.dll','SolidWorks.Interop.swpublished.dll')
+$files = @('SolidWorksAssetExporter.AddIn.dll','SolidWorksAssetExporter.Core.dll','SolidWorksAssetExporter.Mcp.exe','SolidWorks.Interop.sldworks.dll','SolidWorks.Interop.swconst.dll','SolidWorks.Interop.swpublished.dll')
 foreach ($name in $files) {
     if (-not (Test-Path -LiteralPath (Join-Path $PayloadDirectory $name) -PathType Leaf)) { throw "Missing payload: $name" }
 }

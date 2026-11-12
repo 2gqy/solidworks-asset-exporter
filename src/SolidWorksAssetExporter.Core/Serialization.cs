@@ -72,9 +72,13 @@ namespace SolidWorksAssetExporter.Core
 
         public static T Read<T>(string path)
         {
-            var serializer = Create(typeof(T));
             using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-                return (T)serializer.ReadObject(stream);
+                return Read<T>(stream);
+        }
+
+        public static T Read<T>(Stream stream)
+        {
+            return (T)Create(typeof(T)).ReadObject(stream);
         }
 
         private static DataContractJsonSerializer Create(Type type)
@@ -114,7 +118,7 @@ namespace SolidWorksAssetExporter.Core
                 new XAttribute("id", node.Id),
                 new XAttribute("parent_id", node.ParentId ?? string.Empty),
                 new XAttribute("name", node.Name ?? string.Empty),
-                new XAttribute("kind", workstation ? "workstation" : node.Kind.ToString().ToLowerInvariant()));
+                new XAttribute("kind", node.Kind.ToString().ToLowerInvariant()));
             if (workstation) element.Add(new XAttribute("workstation_name", WorkstationName(node)));
             element.Add(new XElement("pose",
                 Number("tx", node.Pose.Tx), Number("ty", node.Pose.Ty), Number("tz", node.Pose.Tz),
@@ -130,10 +134,7 @@ namespace SolidWorksAssetExporter.Core
 
         public static bool IsWorkstation(ExportNode node)
         {
-            if (node.Source == null) return false;
-            var source = node.Source as ICadClassificationSource;
-            var model = source == null ? node.Source.Model : source.ClassificationModel;
-            return PropertyRules.ReadIsWorkstation(node.Properties, model.DocumentKind);
+            return node.Kind == ExportNodeKind.Workstation;
         }
 
         public static string WorkstationName(ExportNode node)
@@ -215,11 +216,20 @@ namespace SolidWorksAssetExporter.Core
         }
     }
 
-    public enum ExistingProjectState { Missing, Reusable }
+    public enum ExistingProjectState { Missing, Reusable, ContentChanged }
 
     public static class ProjectReportValidator
     {
         public static ExistingProjectState Inspect(string projectVersionDirectory, string expectedAssemblyUuid,
+            int expectedVersion, string currentContentFingerprint)
+        {
+            var state = InspectVersion(projectVersionDirectory, expectedAssemblyUuid, expectedVersion, currentContentFingerprint);
+            if (state == ExistingProjectState.ContentChanged)
+                throw new ValidationException("assembly_package 版本已存在但当前内容不同；需要提升 assembly_version。");
+            return state;
+        }
+
+        public static ExistingProjectState InspectVersion(string projectVersionDirectory, string expectedAssemblyUuid,
             int expectedVersion, string currentContentFingerprint)
         {
             var reportPath = Path.Combine(projectVersionDirectory, "export-report.json");
@@ -230,8 +240,6 @@ namespace SolidWorksAssetExporter.Core
             catch (Exception ex) { throw new ValidationException("assembly_package export report 无法读取: " + ex.Message); }
             if (!string.Equals(report.AssemblyUuid, expectedAssemblyUuid, StringComparison.OrdinalIgnoreCase) || report.AssemblyVersion != expectedVersion)
                 throw new ValidationException("assembly_package export report 的 UUID/版本与目录不一致。");
-            if (!string.Equals(report.ContentFingerprint, currentContentFingerprint, StringComparison.OrdinalIgnoreCase))
-                throw new ValidationException("assembly_package 版本已存在但当前内容不同；请提升 assembly_version。");
             var projectPaths = new HashSet<string>((report.Files ?? new List<ManifestFile>()).Select(value => (value.Path ?? string.Empty).Replace('\\', '/')),
                 StringComparer.OrdinalIgnoreCase);
             if (projectPaths.Count != (report.Files ?? new List<ManifestFile>()).Count ||
@@ -264,7 +272,8 @@ namespace SolidWorksAssetExporter.Core
                 catch (ValidationException) { throw; }
                 catch (Exception ex) { throw new ValidationException("assembly_package 承载关系文件无法验证：" + ex.Message); }
             }
-            return ExistingProjectState.Reusable;
+            return string.Equals(report.ContentFingerprint, currentContentFingerprint, StringComparison.OrdinalIgnoreCase)
+                ? ExistingProjectState.Reusable : ExistingProjectState.ContentChanged;
         }
     }
 }

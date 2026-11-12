@@ -15,11 +15,12 @@ namespace SolidWorksAssetExporter.AddIn
         public readonly Dictionary<string, int> Types = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         public readonly HashSet<string> Linked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public string Get(string name) { string value; return Values.TryGetValue(name, out value) ? value : ""; }
-        public int Version { get { return PropertyRules.RequirePositiveInteger(Values, PropertyRules.AssetVersion, "所选资产"); } }
+        public int Version { get { return PropertyRules.ReadManagedVersion(Values, PropertyRules.AssetVersion); } }
     }
     public static class InterfaceEditRules
     {
-        public static readonly string[] Fields = { PropertyRules.ConnectionInterface, PropertyRules.AcceptsInterfaces, PropertyRules.AssetVersion };
+        public static readonly string[] Fields = { PropertyRules.ConnectionInterface, PropertyRules.AcceptsInterfaces,
+            PropertyRules.SlotsNum, PropertyRules.AssetVersion, PropertyRules.AssemblyVersion };
         public static List<string> Split(string value)
         { return (value ?? "").Split(';', '；').Select(s => s.Trim()).Where(s => s.Length > 0).Distinct(StringComparer.Ordinal).ToList(); }
         public static string Name(string value)
@@ -42,22 +43,78 @@ namespace SolidWorksAssetExporter.AddIn
             }
             return result;
         }
+        internal static int? NextVersionIfPublished(IEnumerable<AssetRegistration> registrations, string uuid, int version)
+        {
+            var versions = registrations.Where(asset => string.Equals(asset.Uuid, uuid, StringComparison.OrdinalIgnoreCase))
+                .Select(asset => asset.Version).ToList();
+            if (!versions.Contains(version)) return null;
+            var latest = versions.Max();
+            if (latest == int.MaxValue) throw new ValidationException("当前版本已发布，Wanxiang 版本号已达到上限。");
+            return latest + 1;
+        }
+
         public static Dictionary<string, string> Changes(InterfacePropertySnapshot snapshot, string connection, IEnumerable<string> accepts, int version, bool unpublished)
         {
-            connection = string.IsNullOrWhiteSpace(connection) ? "" : Name(connection);
-            var names = accepts.Select(Name).Distinct(StringComparer.Ordinal).ToList();
-            var proposed = new Dictionary<string, string>(snapshot.Values, StringComparer.OrdinalIgnoreCase);
-            proposed[PropertyRules.ConnectionInterface] = connection; proposed[PropertyRules.AcceptsInterfaces] = string.Join(";", names);
-            var issues = PropertyRules.ValidateAssetConnectionProperties(proposed);
-            if (issues.Count > 0) throw new ValidationException(string.Join("\n", issues));
+            return Changes(snapshot, connection ?? "", accepts, null, version, unpublished);
+        }
+
+        internal static Dictionary<string, string> Changes(InterfacePropertySnapshot snapshot, string connection,
+            IEnumerable<string> accepts, int? slots, int version, bool unpublished)
+        {
             var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var key in Fields.Take(2)) if (snapshot.Get(key) != proposed[key]) result.Add(key, proposed[key]);
-            if (result.Count == 0) return result; // Opening/suggesting/cancelling never bumps versions.
-            if (version < snapshot.Version || (!unpublished && version <= snapshot.Version))
-                throw new ValidationException("已发布或发布状态不确定的资产，修改接口后必须提升 asset_version。未发布资产也不能降版。");
-            if (version != snapshot.Version) result.Add(PropertyRules.AssetVersion, version.ToString(CultureInfo.InvariantCulture));
-            foreach (var key in result.Keys) if (snapshot.Linked.Contains(key)) throw new ValidationException(key + " 使用链接或表达式，请先在 SW 中解除链接后编辑。");
+            if (connection != null)
+            {
+                var proposed = string.IsNullOrWhiteSpace(connection) ? "" : Name(connection);
+                if (snapshot.Get(PropertyRules.ConnectionInterface).Trim() != proposed)
+                    result.Add(PropertyRules.ConnectionInterface, proposed);
+            }
+            if (accepts != null)
+            {
+                var proposed = string.Join(";", accepts.Select(Name).Distinct(StringComparer.Ordinal));
+                if (snapshot.Get(PropertyRules.AcceptsInterfaces).Trim() != proposed)
+                    result.Add(PropertyRules.AcceptsInterfaces, proposed);
+            }
+            if (slots.HasValue)
+            {
+                if (slots.Value < 0) throw new ValidationException("slots_num 必须为非负整数。");
+                var capacity = slots.Value.ToString(CultureInfo.InvariantCulture);
+                if (snapshot.Get(PropertyRules.SlotsNum).Trim() != capacity) result.Add(PropertyRules.SlotsNum, capacity);
+            }
+            if (result.Count > 0)
+            {
+                var proposed = new Dictionary<string, string>(snapshot.Values, StringComparer.OrdinalIgnoreCase);
+                foreach (var change in result) proposed[change.Key] = change.Value;
+                var issues = PropertyRules.ValidateAssetConnectionProperties(proposed);
+                if (issues.Count > 0) throw new ValidationException(string.Join("\n", issues));
+            }
+            AddVersionChange(snapshot, version, unpublished, result);
             return result;
+        }
+
+        internal static Dictionary<string, string> VersionChanges(InterfacePropertySnapshot snapshot, int version,
+            string field = PropertyRules.AssetVersion)
+        {
+            var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (version <= 0) throw new ValidationException(field + " 必须是正整数。");
+            int persistedVersion;
+            if (!PropertyRules.TryReadPositiveInteger(snapshot.Values, field, out persistedVersion) || persistedVersion != version)
+                result.Add(field, version.ToString(CultureInfo.InvariantCulture));
+            return result;
+        }
+
+        private static void AddVersionChange(InterfacePropertySnapshot snapshot, int version, bool unpublished,
+            IDictionary<string, string> result)
+        {
+            var currentVersion = snapshot.Version;
+            if (result.Count == 0 && version == currentVersion) return;
+            if (version <= 0) throw new ValidationException("asset_version 必须是正整数。");
+            if (!unpublished && version <= currentVersion)
+                throw new ValidationException("当前资产版本已发布或发布状态不确定，请提升 asset_version。");
+            int persistedVersion;
+            if (!PropertyRules.TryReadPositiveInteger(snapshot.Values, PropertyRules.AssetVersion, out persistedVersion) ||
+                version != persistedVersion)
+                result.Add(PropertyRules.AssetVersion, version.ToString(CultureInfo.InvariantCulture));
+            foreach (var key in result.Keys) if (snapshot.Linked.Contains(key)) throw new ValidationException(key + " 使用链接或表达式，请先在 SW 中解除链接后编辑。");
         }
         public static void RequireUnchanged(InterfacePropertySnapshot expected, InterfacePropertySnapshot current)
         {
@@ -84,7 +141,8 @@ namespace SolidWorksAssetExporter.AddIn
             if (target.ReadOnly) throw new ValidationException("该源文件为只读，不能修改接口属性。");
             if (target.Dirty) throw new ValidationException("该源文件已有未保存修改，请先在 SW 保存该文件，再重新打开接口编辑窗口。");
             var current = target.Read(); InterfaceEditRules.RequireUnchanged(expected, current);
-            if (changes.Keys.Any(k => !InterfaceEditRules.Fields.Contains(k))) throw new ValidationException("仅支持修改接口和资产版本。");
+            if (changes.Keys.Any(k => !InterfaceEditRules.Fields.Contains(k))) throw new ValidationException("包含插件不维护的属性。");
+            if (changes.Keys.Any(current.Linked.Contains)) throw new ValidationException("插件维护的字段包含链接或表达式，请先解除链接。");
             var attempted = new List<string>();
             try
             {

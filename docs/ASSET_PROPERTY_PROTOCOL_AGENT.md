@@ -8,6 +8,8 @@
 
 Robot 的跨语言身份与路径解析以 [Robot Asset 引用协议](ROBOT_ASSET_REFERENCE_PROTOCOL.md) 为准；普通 Asset UUID 与 Wanxiang 发布契约不变。
 
+在 SOLIDWORKS 中，Agent 通过插件 MCP 更新 `connection_interface`、`accepts_interfaces` 和 `slots_num`。普通资产版本和装配包版本由插件维护。示例中的值说明存储语义。操作方法见 [MCP 使用指南](MCP.md)。
+
 ## 1. 数据模型
 
 每个 Asset 由一组键值属性描述。属性在存储层均为字符串，Agent 必须按本协议声明的逻辑类型解释。

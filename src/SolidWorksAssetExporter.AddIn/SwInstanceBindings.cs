@@ -78,9 +78,19 @@ namespace SolidWorksAssetExporter.AddIn
             EnsureReadable();
             if (Pending) throw new ValidationException("承载关系已应用，待保存装配；请保存成功后重新预览。");
         }
+
+        internal void Save(bool silent)
+        {
+            RequireWritable();
+            int error = 0, warning = 0;
+            if (!_document.Save3(silent ? 1 : 0, ref error, ref warning) || error != 0)
+                throw new ValidationException("总装配保存未完成，错误码：" + error + "。" + LastSaveError);
+            RequireSaved();
+        }
         public void Commit(List<InstanceBinding> records)
         {
             RequireWritable();
+            records = DistinctStoredPairs(records);
             var current = Current;
             if (current.Relations.Select(r => r.Id).SequenceEqual(records.Select(r => r.Id))) return;
             // SetSaveFlag is outside every internal model-resolution mutation exemption.
@@ -107,7 +117,8 @@ namespace SolidWorksAssetExporter.AddIn
             };
             // Never accept a persist reference that does not round-trip in this top-level context.
             var resolved = ResolveComponent(endpoint);
-            if (Context(resolved) != endpoint.Context) throw new ValidationException("持久引用未返回所选实例上下文。");
+            if (!string.Equals(resolved.Name2, sw.Name, StringComparison.Ordinal))
+                throw new ValidationException("持久引用未返回所选实例：" + sw.InstancePath);
             return endpoint;
         }
 
@@ -141,19 +152,16 @@ namespace SolidWorksAssetExporter.AddIn
         public ExportNode Resolve(BindingEndpoint endpoint, AssemblyExportPlan plan)
         {
             var component = ResolveComponent(endpoint);
-            var context = Context(component);
             if (!ReferenceEquals(_indexedPlan, plan))
             {
-                _nodeIndex = new Dictionary<string, ExportNode>(StringComparer.Ordinal);
-                foreach (var n in Flatten(plan.Roots).Where(n => n.Source is SwCadNode && n.Source.InstanceId != "root"))
-                {
-                    var key = Context(((SwCadNode)n.Source).Component);
-                    if (_nodeIndex.ContainsKey(key)) throw new ValidationException("当前装配组件上下文不唯一，不能解析承载关系。");
-                    _nodeIndex.Add(key, n);
-                }
+                _nodeIndex = IndexComponents(plan);
                 _indexedPlan = plan;
             }
-            ExportNode node; _nodeIndex.TryGetValue(context, out node);
+            ExportNode node; _nodeIndex.TryGetValue(component.Name2, out node);
+            return ValidateEndpoint(endpoint, node);
+        }
+        internal static ExportNode ValidateEndpoint(BindingEndpoint endpoint, ExportNode node)
+        {
             InstanceBindingRules.RequireAsset(node);
             if (IdentityService.AssetIdentitySeed(node.Source.Model) != endpoint.SourceIdentity ||
                 !string.Equals(((SwCadNode)node.Source).SourcePath, endpoint.SourcePath, StringComparison.OrdinalIgnoreCase))
@@ -162,8 +170,55 @@ namespace SolidWorksAssetExporter.AddIn
             node.Properties = PropertyRules.Merge(node.Source.Model);
             return node;
         }
+        internal Func<BindingEndpoint, ExportNode> CreateResolver(AssemblyExportPlan plan)
+        { return CacheResolver(endpoint => Resolve(endpoint, plan)); }
+
+        internal static Func<BindingEndpoint, ExportNode> CacheResolver(Func<BindingEndpoint, ExportNode> resolve)
+        {
+            // A saved graph contains separate endpoint objects even for the same occurrence.
+            // Reuse the resolution only within one pass over the current plan.
+            var nodes = new Dictionary<Tuple<string, string, string, string>, ExportNode>();
+            var errors = new Dictionary<Tuple<string, string, string, string>, string>();
+            return endpoint =>
+            {
+                if (endpoint == null) return resolve(endpoint);
+                var key = StoredEndpointKey(endpoint);
+                string error;
+                if (errors.TryGetValue(key, out error)) throw new ValidationException(error);
+                ExportNode node;
+                if (nodes.TryGetValue(key, out node)) return node;
+                try { node = resolve(endpoint); }
+                catch (ValidationException ex) { errors.Add(key, ex.Message); throw; }
+                nodes.Add(key, node);
+                return node;
+            };
+        }
+        private static Tuple<string, string, string, string> StoredEndpointKey(BindingEndpoint endpoint)
+        { return Tuple.Create(endpoint.Context, endpoint.Reference, endpoint.SourceIdentity, endpoint.SourcePath); }
+
+        private static List<InstanceBinding> DistinctStoredPairs(IEnumerable<InstanceBinding> records)
+        {
+            return records.GroupBy(r => Tuple.Create(StoredEndpointKey(r.Parent), StoredEndpointKey(r.Child)))
+                .Select(group => group.First()).ToList();
+        }
+
         public AssemblyRelations Export(AssemblyExportPlan plan)
-        { EnsureReadable(); return InstanceBindingRules.Resolve(Current.Relations, e => Resolve(e, plan), plan); }
+        { EnsureReadable(); return InstanceBindingRules.Resolve(Current.Relations, CreateResolver(plan), plan); }
+        internal static Dictionary<string, ExportNode> IndexComponents(AssemblyExportPlan plan)
+        {
+            var nodes = new Dictionary<string, ExportNode>(StringComparer.Ordinal);
+            foreach (var node in Flatten(plan.Roots))
+            {
+                var source = node.Source as SwCadNode;
+                if (source == null || source.InstanceId == "root") continue;
+                // Name is the full Component2.Name2 captured during traversal.
+                // Looking it up does not read IDs from COM objects retained by the plan.
+                if (nodes.ContainsKey(source.Name))
+                    throw new ValidationException("当前总装配存在重复的组件实例名称：" + source.Name);
+                nodes.Add(source.Name, node);
+            }
+            return nodes;
+        }
         public static IEnumerable<ExportNode> Flatten(IEnumerable<ExportNode> roots)
         {
             foreach (var n in roots) { yield return n; foreach (var c in Flatten(n.Children)) yield return c; }
@@ -189,6 +244,8 @@ namespace SolidWorksAssetExporter.AddIn
                 finally { Marshal.FreeCoTaskMem(count); }
                 using (var memory = new MemoryStream(bytes)) _data = (BindingDocument)new DataContractSerializer(typeof(BindingDocument)).ReadObject(memory);
                 _data.ForConfiguration(int.MinValue, "validation");
+                foreach (var configuration in _data.Configurations)
+                    configuration.Relations = DistinctStoredPairs(configuration.Relations);
             }
             catch (Exception ex) { Error = "承载关系存储无法读取，禁止忽略已有记录：" + ex.Message; }
             finally

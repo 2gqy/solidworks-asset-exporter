@@ -41,11 +41,13 @@ namespace SolidWorksAssetExporter.AddIn
         internal string ActiveDocumentPath { get; set; }
         internal string ActiveConfigurationName { get; set; }
         internal long BindingRevision { get; set; }
+        internal int? SuggestedProjectVersion { get; set; }
     }
 
     internal sealed class AssetInspection
     {
         public SwCadNode Node { get; set; }
+        public string SourcePath { get; set; }
         public string Uuid { get; set; }
         public string Fingerprint { get; set; }
         public int Version { get; set; }
@@ -90,6 +92,7 @@ namespace SolidWorksAssetExporter.AddIn
         private readonly SwGeometryExporter _geometry;
         private readonly SwPluginMutationTracker _mutationTracker;
         private readonly WanxiangRegistryProvider _registryProvider;
+        internal SwPluginMutationTracker MutationTracker { get { return _mutationTracker; } }
 
         public ExportCoordinator(SldWorks app)
         {
@@ -122,7 +125,7 @@ namespace SolidWorksAssetExporter.AddIn
             var root = SwAssemblyRoot.FromActiveDocument(_app, _mutationTracker);
             var classificationIssues = new List<string>();
             var requiredPropertyIssues = new List<string>();
-            CollectClassificationAndRequiredPropertyIssues(root, true, settings.ExportProject, classificationIssues,
+            CollectClassificationAndRequiredPropertyIssues(root, classificationIssues,
                 requiredPropertyIssues, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
             if (classificationIssues.Count != 0)
             {
@@ -242,8 +245,9 @@ namespace SolidWorksAssetExporter.AddIn
                     current.VersionDecision = decision;
                     if (decision.Kind == AssetVersionDecisionKind.UpgradeRequired)
                     {
+                        if (!decision.SuggestedVersion.HasValue) throw new ValidationException("asset_version 已达到上限。");
                         current.RequiresVersionUpgrade = true;
-                        current.SuggestedVersion = decision.SuggestedVersion ?? current.Version + 1;
+                        current.SuggestedVersion = decision.SuggestedVersion.Value;
                     }
                     string packageError = null;
                     if (decision.CanExport)
@@ -299,7 +303,7 @@ namespace SolidWorksAssetExporter.AddIn
             result.Preview = BuildPreview(plan.Roots, result.AssetVersionMessages, registrySnapshot,
                 settings.SaveRegistryLocally, result.ProjectVersionMessage, result.ValidationErrors,
                 settings.ExportProject);
-            if (bindings != null)
+            if (bindings != null && plan.Relations != null)
             {
                 var relationText = new StringBuilder("\r\n承载关系（当前配置）：\r\n");
                 foreach (var r in plan.Relations.Relations)
@@ -314,8 +318,7 @@ namespace SolidWorksAssetExporter.AddIn
             return result;
         }
 
-        private static void CollectClassificationAndRequiredPropertyIssues(SwCadNode node, bool isRoot,
-            bool exportProject,
+        private static void CollectClassificationAndRequiredPropertyIssues(SwCadNode node,
             IList<string> classificationIssues, IList<string> requiredPropertyIssues,
             ISet<string> inspectedAssetProperties)
         {
@@ -345,19 +348,6 @@ namespace SolidWorksAssetExporter.AddIn
                 }
                 catch (ValidationException ex) { AddIssue(classificationIssues, ex.Message); }
             }
-            if (isRoot && exportProject && properties != null)
-            {
-                try
-                {
-                    PropertyRules.RequirePositiveInteger(properties, PropertyRules.AssemblyVersion, node.Name);
-                }
-                catch (Exception ex)
-                {
-                    if (IsFatal(ex)) throw;
-                    AddIssue(classificationIssues, ex.Message);
-                }
-            }
-
             if (isAsset)
             {
                 var isRobot = PropertyRules.IsRobotClass(properties);
@@ -369,7 +359,6 @@ namespace SolidWorksAssetExporter.AddIn
                     {
                         ModelRules.ValidateExportable(model);
                         PropertyRules.RequireWanxiangAssetClass(properties, node.Name);
-                        PropertyRules.RequirePositiveInteger(properties, PropertyRules.AssetVersion, node.Name);
                     }
                 }
                 catch (Exception ex)
@@ -429,17 +418,8 @@ namespace SolidWorksAssetExporter.AddIn
                 AddIssue(classificationIssues, "模型 [" + node.Name + "] 子组件读取失败：" + ex.Message);
             }
 
-            if (exportProject && children.Count == 0 && model != null)
-            {
-                try { ModelRules.ValidateExportable(model); }
-                catch (Exception ex)
-                {
-                    if (IsFatal(ex)) throw;
-                    AddIssue(classificationIssues, ex.Message);
-                }
-            }
             foreach (var child in children)
-                CollectClassificationAndRequiredPropertyIssues(child, false, exportProject, classificationIssues,
+                CollectClassificationAndRequiredPropertyIssues(child, classificationIssues,
                     requiredPropertyIssues, inspectedAssetProperties);
         }
 
@@ -459,65 +439,50 @@ namespace SolidWorksAssetExporter.AddIn
                 issues.Add(message);
         }
 
-        internal IList<string> OpenAssetsRequiringVersionUpgrade(AnalysisResult analysis)
+        internal static IList<AssetInspection> AssetsRequiringVersionUpgrade(AnalysisResult analysis)
         {
-            var results = new List<string>();
-            if (analysis == null) return results;
-            var inspections = analysis.AssetInspections.Values
-                .Where(value => value != null && value.RequiresVersionUpgrade && value.Node != null &&
+            return analysis.AssetInspections.Values
+                .Where(value => value.RequiresVersionUpgrade && !string.IsNullOrWhiteSpace(value.SourcePath) &&
                     !value.IsEmbeddedAssetRoot &&
-                    !AssetSourcePathPolicy.IsSessionEmbeddedModelPath(value.Node.SourcePath))
-                .GroupBy(value => Path.GetFullPath(value.Node.SourcePath), StringComparer.OrdinalIgnoreCase)
-                .Select(group => group.First()).ToList();
-            foreach (var inspection in inspections)
+                    !AssetSourcePathPolicy.IsSessionEmbeddedModelPath(value.SourcePath))
+                .GroupBy(value => value.SourcePath, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderBy(value => Path.GetFileName(value.SourcePath), StringComparer.CurrentCultureIgnoreCase)
+                .ThenBy(value => value.SourcePath, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        internal bool OpenAssetForVersionEditing(string sourcePath)
+        {
+            var path = Path.GetFullPath(sourcePath);
+            var extension = Path.GetExtension(path);
+            var isAssembly = string.Equals(extension, ".SLDASM", StringComparison.OrdinalIgnoreCase);
+            if (AssetSourcePathPolicy.IsSessionEmbeddedModelPath(path) ||
+                (!isAssembly && !string.Equals(extension, ".SLDPRT", StringComparison.OrdinalIgnoreCase)))
+                throw new ValidationException("待升版资产必须是外部 SLDASM/SLDPRT 文件：" + path);
+            if (!File.Exists(path))
+                throw new ValidationException("资产源文件不存在：" + path);
+
+            var document = _app.GetOpenDocumentByName(path) as ModelDoc2;
+            if (document == null)
             {
-                var path = Path.GetFullPath(inspection.Node.SourcePath);
-                var suggested = inspection.SuggestedVersion > inspection.Version
-                    ? inspection.SuggestedVersion : inspection.Version + 1;
-                try
-                {
-                    if (!File.Exists(path))
-                    {
-                        results.Add("打开失败：" + path + "（源文件不存在）");
-                        continue;
-                    }
-                    var document = _app.GetOpenDocumentByName(path) as ModelDoc2;
-                    if (document == null)
-                    {
-                        int errors = 0, warnings = 0;
-                        var documentType = inspection.Node.SourceDocumentKind == DocumentKind.Assembly
-                            ? (int)swDocumentTypes_e.swDocASSEMBLY : (int)swDocumentTypes_e.swDocPART;
-                        document = _app.OpenDoc6(path, documentType,
-                            (int)swOpenDocOptions_e.swOpenDocOptions_Silent, string.Empty,
-                            ref errors, ref warnings) as ModelDoc2;
-                        if (document == null || errors != 0)
-                        {
-                            results.Add(string.Format(CultureInfo.InvariantCulture,
-                                "打开失败：{0}（errors={1}, warnings={2}）", path, errors, warnings));
-                            continue;
-                        }
-                    }
-                    int activationErrors = 0;
-                    var active = _app.ActivateDoc3(document.GetTitle(), false,
-                        (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref activationErrors) as ModelDoc2;
-                    if (active == null)
-                    {
-                        results.Add("已打开但无法激活：" + path);
-                        continue;
-                    }
-                    var readOnly = false;
-                    try { readOnly = active.IsOpenedReadOnly(); }
-                    catch { }
-                    results.Add((readOnly ? "已打开（只读，需解除只读后修改）" : "已打开") + "：" + path +
-                        "\r\n    asset_version：v" + inspection.Version.ToString(CultureInfo.InvariantCulture) +
-                        " → 建议 v" + suggested.ToString(CultureInfo.InvariantCulture));
-                }
-                catch (Exception ex)
-                {
-                    results.Add("打开失败：" + path + "（" + ex.Message + "）");
-                }
+                int errors = 0, warnings = 0;
+                var documentType = isAssembly
+                    ? (int)swDocumentTypes_e.swDocASSEMBLY : (int)swDocumentTypes_e.swDocPART;
+                document = _app.OpenDoc6(path, documentType,
+                    (int)swOpenDocOptions_e.swOpenDocOptions_Silent, string.Empty,
+                    ref errors, ref warnings) as ModelDoc2;
+                if (document == null || errors != 0)
+                    throw new ValidationException(string.Format(CultureInfo.InvariantCulture,
+                        "无法打开资产：{0}（errors={1}, warnings={2}）", path, errors, warnings));
             }
-            return results;
+
+            int activationErrors = 0;
+            var active = _app.ActivateDoc3(document.GetTitle(), false,
+                (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref activationErrors) as ModelDoc2;
+            if (active == null || !string.Equals(active.GetPathName(), path, StringComparison.OrdinalIgnoreCase))
+                throw new ValidationException("已打开但无法激活所选资产：" + path);
+            return active.IsOpenedReadOnly();
         }
 
         private AnalysisResult InspectProjectFingerprints(AnalysisResult result,
@@ -572,8 +537,24 @@ namespace SolidWorksAssetExporter.AddIn
             var destination = ProjectVersionDirectory(settings, plan);
             try
             {
-                result.ProjectState = ProjectReportValidator.Inspect(destination, plan.AssemblyUuid,
+                result.ProjectState = ProjectReportValidator.InspectVersion(destination, plan.AssemblyUuid,
                     plan.AssemblyVersion, result.ProjectFingerprint);
+                if (result.ProjectState == ExistingProjectState.ContentChanged)
+                {
+                    var latest = plan.AssemblyVersion;
+                    foreach (var directory in Directory.EnumerateDirectories(Path.GetDirectoryName(destination), "v*"))
+                    {
+                        int version;
+                        if (int.TryParse(Path.GetFileName(directory).Substring(1), NumberStyles.None, CultureInfo.InvariantCulture, out version))
+                            latest = Math.Max(latest, version);
+                    }
+                    if (latest == int.MaxValue) throw new ValidationException("assembly_version 已达到上限。");
+                    result.SuggestedProjectVersion = latest + 1;
+                    result.CanExport = false;
+                    result.ProjectVersionMessage = "[装配内容已变化，插件建议提升 assembly_version 至 v" +
+                        result.SuggestedProjectVersion + "]";
+                    return;
+                }
                 result.ProjectVersionMessage = result.ProjectState == ExistingProjectState.Reusable
                     ? "[assembly_package 指纹一致：assembly_version v" +
                         plan.AssemblyVersion.ToString(CultureInfo.InvariantCulture) + " 可直接复用]"
@@ -830,7 +811,8 @@ namespace SolidWorksAssetExporter.AddIn
                 StringComparer.OrdinalIgnoreCase);
             return new AssetInspection
             {
-                Node = source, Uuid = node.GeometryUuid, Fingerprint = fingerprint, Version = version,
+                Node = source, SourcePath = Path.GetFullPath(source.SourcePath),
+                Uuid = node.GeometryUuid, Fingerprint = fingerprint, Version = version,
                 State = ExistingAssetState.Missing, ModelFiles = modelFiles, Drawings = drawings,
                 Properties = properties
             };
@@ -895,7 +877,7 @@ namespace SolidWorksAssetExporter.AddIn
             return manifest;
         }
 
-        private static IList<string> RegisteredPropertyDifferences(IDictionary<string, string> registered,
+        internal static IList<string> RegisteredPropertyDifferences(IDictionary<string, string> registered,
             IDictionary<string, string> current)
         {
             var differences = new List<string>();
@@ -907,6 +889,9 @@ namespace SolidWorksAssetExporter.AddIn
             foreach (var key in registered.Keys.Union(current.Keys, StringComparer.OrdinalIgnoreCase)
                 .OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
             {
+                if (key.Equals(PropertyRules.AssetVersion, StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals(PropertyRules.AssemblyVersion, StringComparison.OrdinalIgnoreCase))
+                    continue;
                 string oldValue;
                 string value;
                 var oldPresent = registered.TryGetValue(key, out oldValue);

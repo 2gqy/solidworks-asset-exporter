@@ -13,7 +13,7 @@
 
 当前正式版本为 `v1.0.5`。
 
-本次交付候选版本为 `v1.1.0-rc4`，新增实例承载关系及装配包适配，支持分组、批量/连续选择、链式绑定，以及面板内接口属性编辑、子接口建议和本机接口库。rc4 支持快换架直接承载移液器等 Tool，以及同一个子实例关联多个父组件；导出关系格式升级为 1.1，并兼容读取旧 1.0 包。使用说明见 [实例承载关系协议](docs/INSTANCE_BINDING_PROTOCOL.md)，接口编辑验证见 [接口编辑验收记录](docs/INSTANCE_BINDING_INTERFACE_RESULTS.md)。
+当前源码支持分组、批量和链式绑定，支持快换架直接承载移液器等 Tool，以及同一个子实例关联多个父组件。导出关系格式为 1.1，兼容读取旧 1.0 包。参见 [实例承载关系协议](docs/INSTANCE_BINDING_PROTOCOL.md) 和 [MCP 使用指南](docs/MCP.md)。
 
 当前源码的机器人引用规则以 [Robot Asset 引用协议](docs/ROBOT_ASSET_REFERENCE_PROTOCOL.md) 为准；下方 `v1.0.5` 升版说明保留历史发布行为，不表示旧引用格式仍受支持。
 
@@ -24,7 +24,7 @@
 - 分类扫描会过滤隐藏、真正抑制、包络组件；所有分类与业务属性只从模型文件级“自定义”页读取，完全忽略“配置特定”页。`is_asset`、`asset_version`、`assembly_version` 按准确键名和安全缓存读取，不再误用只能提供配置特定属性的组件管理器，也不会因属性求值把模型标成已修改。普通轻量化模型按需隐藏打开、读取后立即关闭；`swx...\VC~~`/`IC~~` 虚拟或内嵌组件绝不独立打开和关闭，只在父装配中临时解析并恢复原轻化状态。结果按源文件缓存，同一文件的重复实例只读取一次。
 - Asset 分类边界保持短路：父节点一旦命中 Asset，会在读取 `GetChildren()` 之前返回，不校验子零件/子装配体属性，也不会生成内部节点。源文件收集仅从组件引用读取路径和文档类型，不再为了打包而打开子文档读取元数据。
 - UUIDv5、版本规则、文件级必填属性、已保存/无未保存修改校验。分类预览会在计算 Asset 指纹和远端版本之前识别 Asset 根本身是否为虚拟/内嵌组件；这类根不会被当作普通升版模型打开，会明确要求先保存为外部 SLDASM/SLDPRT，并禁止导出。
-- Asset UUID v2 只使用 SOLIDWORKS 内部创建时间和完整文件名（含扩展名）生成稳定 UUIDv5 哈希；配置、显示状态、路径和内容版本不参与 Asset 身份。预览发现内容指纹已变化但 `asset_version` 未提升时，会把对应 Asset 模型以可编辑方式直接打开、激活，并弹出当前版本和建议版本的醒目提示。
+- Asset UUID v2 使用 SOLIDWORKS 内部创建时间和完整文件名生成稳定 UUIDv5。预览列出版本变更建议，可在导出窗口点击“应用插件建议版本”。MCP 导出自动应用并重新校验。
 - STEP AP214 和二进制 Fine STL 双格式导出；模型文档本地原点作为几何原点。
 - XML 父子相对位姿、米、`qx/qy/qz/qw`、Asset ID 或 assembly_package 相对 mesh 路径。
 - Asset manifest、SHA-256、内容指纹、版本命中复用、同 ID 内容变化拒绝覆盖。
@@ -40,15 +40,15 @@
 - 上传顺序固定为 Asset 原子发布、Wanxiang assembly_package 上传。Asset 发布接口的 201 新注册和 200 幂等复用都视为成功；409 冲突不会留下半发布目录或改动注册表。只有启用“保存本地副本”时，发布完成后才通过 `GET /asset/registry` 下载服务端最终注册表并同步到本地。
 - 上传状态逐项显示 `Asset N/M`，Wanxiang assembly_package 分别显示打包、发送、收到 HTTP 响应和校验完成。每次上传都会在 `%LOCALAPPDATA%\SolidWorksAssetExporter\uploads` 创建独立日志，记录请求 URL、HTTP 状态码、耗时和截断后的响应摘要（不记录 API key）；插件界面可通过“查看上传日志”直接打开。上传请求使用完整响应读取，使 30 分钟 HTTP 超时同时覆盖请求体和响应体，避免服务端已处理但客户端无限等待响应结束。
 
-现有 128 项自动测试，新增实例承载关系、批量/链式交互和接口编辑回归，并包括 Asset 硬边界短路、父 Asset 跳过子属性、Asset UUID 仅由内部创建时间和文件名生成、配置特定属性完全忽略、必填 Asset 属性完整汇总、快换接口属性汇总校验与角色推导、Wanxiang 0.4.0 `class` 拼写校验、Asset 指纹版本复用/升级/重复内容判断、STL 几何比对忽略导出头/法线/面顺序、Robot 仅生成 assembly_package XML 地址引用、关闭 assembly_package 后跳过其本地/远端输出、需升版外部 Asset 自动打开且非只读、虚拟 Asset 根不作为升版文档打开、远端未注册的本地冲突包备份重建且不误报升版、预览纯文件系统图纸查找、原始 SLDDRW 与源模型同目录且不生成 PDF、未变化文件哈希缓存复用、零件 Asset 及装配包几何单元均不调用 Pack and Go、预览后源文件变化拒绝导出、Wanxiang `GET /asset/registry` 预览、默认不保存本地副本和逻辑空注册表、`PUT /asset/{uuid}/v{version}` 原子发布及 Asset→assembly_package 顺序、本地与远端 assembly_package 路径一致性、上传逐项进度、可读日志和不泄漏 API key 的 HTTP 响应诊断、轻化组件读取文件级 `is_asset=1`、同一源文件的重复实例只读取一次、已加载组件返回父装配文档时按源路径回退、虚拟/内嵌组件只在父装配中解析并恢复原轻化状态、Pack and Go 允许虚拟子组件不作为独立文件出现、Pack and Go 只在临时激活目标 Asset 子装配体后运行并恢复原窗口、Pack and Go 隔离 Asset 边界外上下文引用、Pack and Go 状态数组长度变化但 Asset 输出完整时继续提交、插件解析或配置恢复产生的 dirty 标志与后续用户模型修改相区分、完整元数据只读取文件级自定义属性、Wanxiang Bearer/URL/ZIP 契约、模型窗口所有权、避免强制只读、`QuitDoc` 关闭回退、父装配内存引用和激活警告；Add-in 代码路径也可使用 `InteropStubs.cs` 做隔离契约构建，生产构建不会包含该 stub。
+现有 128 项自动测试，新增实例承载关系、批量/链式交互和接口编辑回归，并包括 Asset 硬边界短路、父 Asset 跳过子属性、Asset UUID 仅由内部创建时间和文件名生成、配置特定属性完全忽略、必填 Asset 属性完整汇总、快换接口属性汇总校验与角色推导、Wanxiang 0.4.0 `class` 拼写校验、Asset 指纹版本复用/升级/重复内容判断、STL 几何比对忽略导出头/法线/面顺序、Robot 仅生成 assembly_package XML 地址引用、关闭 assembly_package 后跳过其本地/远端输出、待升版 Asset 清单按需打开所选源文件、虚拟 Asset 根不作为升版文档打开、远端未注册的本地冲突包备份重建且不误报升版、预览纯文件系统图纸查找、原始 SLDDRW 与源模型同目录且不生成 PDF、未变化文件哈希缓存复用、零件 Asset 及装配包几何单元均不调用 Pack and Go、预览后源文件变化拒绝导出、Wanxiang `GET /asset/registry` 预览、默认不保存本地副本和逻辑空注册表、`PUT /asset/{uuid}/v{version}` 原子发布及 Asset→assembly_package 顺序、本地与远端 assembly_package 路径一致性、上传逐项进度、可读日志和不泄漏 API key 的 HTTP 响应诊断、轻化组件读取文件级 `is_asset=1`、同一源文件的重复实例只读取一次、已加载组件返回父装配文档时按源路径回退、虚拟/内嵌组件只在父装配中解析并恢复原轻化状态、Pack and Go 允许虚拟子组件不作为独立文件出现、Pack and Go 只在临时激活目标 Asset 子装配体后运行并恢复原窗口、Pack and Go 隔离 Asset 边界外上下文引用、Pack and Go 状态数组长度变化但 Asset 输出完整时继续提交、插件解析或配置恢复产生的 dirty 标志与后续用户模型修改相区分、完整元数据只读取文件级自定义属性、Wanxiang Bearer/URL/ZIP 契约、模型窗口所有权、避免强制只读、`QuitDoc` 关闭回退、父装配内存引用和激活警告；Add-in 代码路径也可使用 `InteropStubs.cs` 做隔离契约构建，生产构建不会包含该 stub。
 
 本项目已在 SOLIDWORKS Premium 2025 SP5.0 和官方 Interop 33.5.0.53 上完成生产构建、COM 安装与加载和命令打开验证。轻量化装配体按需文档生命周期、完整 STEP/STL、装配体 Asset Pack and Go 和 SLDDRW 产物仍需完成最终现场验收。SOLIDWORKS 2026 尚未实机验证。
 
 ## 自定义属性
 
-零件和装配体模板默认将“是否为资产”设为“否”。选“是”后显示资产属性。装配体选“否”时显示“工位属性”，勾选“工位（Workstation）”后填写工位名称。将已标记的工位改为资产时，先取消勾选“工位”，再将“是否为资产”改为“是”。装配包版本始终可填写。已有旧工位字段的模型，填写新字段时应沿用现有的工位标记和名称。
+零件和装配体模板默认将“是否为资产”设为“否”。选“是”后显示资产属性。装配体选“否”时显示“工位属性”，勾选“工位（Workstation）”后填写工位名称。已有旧工位字段的模型，填写新字段时应沿用现有的工位标记和名称。
 
-工位装配体使用文件级 `is_workstation=true|1|yes` 标记，兼容既有模型的 `is-workstation`；名称使用 `workstation_name`，兼容 `workstationname`。两种写法同时存在时必须一致，名称不能为空。分类预览会汇总缺失名称的问题并阻止导出；XML 输出 `kind="workstation"` 和 `workstation_name`，保留工位层级及相对位姿。非 Asset 的普通装配体有子节点时输出 `kind="group"`；空工位仍保留为 workstation，不降为 group 或 meshes。
+工位标记仅适用于非 Asset 装配体。导出时会忽略 Asset 和普通零件上残留的工位属性。工位装配体使用文件级 `is_workstation=true|1|yes` 标记，兼容既有模型的 `is-workstation`；名称使用 `workstation_name`，兼容 `workstationname`。两种写法同时存在时必须一致，名称不能为空。分类预览会汇总缺失名称的问题并阻止导出；XML 输出 `kind="workstation"` 和 `workstation_name`，保留工位层级及相对位姿。非 Asset 的普通装配体有子节点时输出 `kind="group"`；空工位仍保留为 workstation，不降为 group 或 meshes。
 
 资产属性协议：
 
@@ -56,24 +56,13 @@
 - [资产属性协议（工程师版）](docs/ASSET_PROPERTY_PROTOCOL.md)：面向工程师的属性含义、资产关系和示例。
 - [Robot Asset 引用协议](docs/ROBOT_ASSET_REFERENCE_PROTOCOL.md)：机器人名称 UUID、XML 引用及 NAS 目录解析的跨语言约定。
 
-在总装配体根模型设置：
-
-```text
-assembly_version = 1       # 必填正整数
-```
-
-在 Asset 根零件或子装配体设置：
-
-```text
-is_asset = true            # true / 1 / yes
-asset_version = 1          # 必填正整数
-```
+在 Asset 根零件或子装配体设置 `is_asset=true`。插件在导出时初始化普通资产和装配包版本。Robot 引用的版本仍对应外部 URDF 的发布版本。
 
 插件只读取模型文件级“自定义”页，不读取“配置特定”页；配置级属性无论是否为空、是否与文件级同名，均不参与分类、版本判断或 manifest。父节点已是 Asset 时，子节点属性完全不参与分类或 manifest 校验。Asset manifest 只保存 Asset 根文件级自定义属性。
 
-rc3 可以在“承载关系 → 接口属性 / 建议…”中填写接口，并从选定子组件的 `connection_interface` 生成 `accepts_interfaces` 建议，核对后保存到源模型文件级属性；无需反复进入 SW 属性页。已有接受接口保留，修改默认要求资产升版。
+Agent 可通过 MCP 新增并保存承载关系、维护文件级接口和槽位、预览及导出资产。普通资产版本和装配包版本由插件根据发布状态和内容指纹维护。连接方法和工具说明见 [MCP 使用指南](docs/MCP.md)。
 
-接口库补充包提供 103 个按 `类别.规格[.尺寸/型号]` 命名的候选。属性模板按 Tool、Fixture 和快换角色只读展示相应接口。普通资产需要建立承载关系时，可直接在插件中填写对应接口。旧属性和旧名称保留；应用现有模板补丁使用 `Install-InterfaceOptions.ps1`，见 [接口库与模板说明](docs/INTERFACE_CATALOG_GUIDE.md)。
+接口库补充包提供 103 个按 `类别.规格[.尺寸/型号]` 命名的候选。更新现有属性模板可使用 `Install-InterfaceOptions.ps1`。详见 [接口库与模板说明](docs/INTERFACE_CATALOG_GUIDE.md)。
 
 ### Asset 属性填写说明
 
@@ -91,7 +80,7 @@ rc3 可以在“承载关系 → 接口属性 / 建议…”中填写接口，�
 | `is_quick_changer_rack` | 布尔值 | 是否为快换支架。快换支架不能由机器人搬运但需要参与快换交互，必须是 `class=station`，并通过 `accepts_interfaces` 声明可停放接口。 |
 | `connection_interface` | 文本 | 当前 Asset 连接到父级 Asset 时提供的单个接口。多个可接受接口应填写到 `accepts_interfaces`。 |
 | `accepts_interfaces` | 文本列表 | 当前 Asset 可以接收的子级机械接口或工件接口；多个值使用英文分号 `;` 分隔。父级的该字段必须包含子级的 `connection_interface`。 |
-| `slots_num` | 非负整数 | 当前 Asset 可提供的安装槽位、工位或容纳位置数量；`0` 表示不提供槽位。 |
+| `slots_num` | 非负整数 | 由插件写入的总槽位容量，包含空槽。`0` 表示无槽位。 |
 | `is_adjustable` | 布尔值 | Asset 的安装位姿或空间布局位置是否允许调整。`movable` 通常不可调，`structure` 可以根据布局需要设为可调。 |
 | `has_QRcode` | 布尔值 | 当前 Asset 是否需要二维码标识。Property Tab Builder 模板使用 `1`/`0`；选中后显示二维码数量、尺寸和间距字段。 |
 | `QR_num` | 非负整数 | 当前 Asset 上的二维码数量。没有二维码时填写 `0`；启用 `has_QRcode` 时应填写大于 `0` 的数量。 |
@@ -143,7 +132,7 @@ rc3 可以在“承载关系 → 接口属性 / 建议…”中填写接口，�
 | 10 ml 试管 | `movable` | `connection_interface=试管-D20` |
 | 固定试管架/支架适配器 | `station` | `is_fixture=1`；永久固定时 `connection_interface` 留空；`accepts_interfaces=试管支架-A` 或 `试管-D20` |
 
-当前插件使用 `is_asset` 进行分类。所有 Asset（包括 Robot）在 `is_asset=true|1|yes` 时都要求正整数 `asset_version`；Robot 引用为 `asset_id="<robot-uuid>:<asset_version>"`，UUID 仅由文件级“设计目的”中的机器人名称生成。只有勾选“导出 assembly_package”时才在总装配体上强制要求正整数 `assembly_version`。分类预览会一次性检查必填属性、布尔格式、快换侧别和角色所需接口；通过后，新字段原样保存到非 Robot Asset manifest。
+插件使用 `is_asset` 进行分类。普通资产及装配包缺少有效版本时从 v1 开始校验，插件在导出时保存最终版本。Robot 引用为 `asset_id="<robot-uuid>:<asset_version>"`，UUID 由文件级“设计目的”中的机器人名称生成。分类预览检查必填属性、布尔格式、快换侧别和角色所需接口，通过后将普通资产属性写入 manifest。
 
 同一 `uuid + asset_version` 的原始指纹一致时直接复用；原始指纹不同但实际 STL 几何及文件级自定义属性语义一致时，也复用 Wanxiang 已注册的原始包。比较属性时，未设置与空文本等价；`is_tool`、`is_fixture`、`is_quick_changer`、`is_quick_changer_rack`、`is_adjustable`、`has_QRcode` 的未设置、`0`、`false`、`no` 统一视为 false。若几何或非默认的发布属性变化，则拒绝用同一个版本号覆盖，必须提升 `asset_version`。Asset 注册信息以 Wanxiang 注册表为准；本地 Asset 地址由输出根目录、UUID 和版本确定，每个版本目录中的 manifest 是该 Asset 的文件与哈希记录。
 
@@ -155,7 +144,7 @@ Robot 使用独立的 UUIDv5 名称规则：namespace 为 `6ba7b811-9dad-11d1-80
 
 原始指纹命中时，预览无需打开每个模型或工程图；未命中时，仅对需要语义复核的 Asset 临时激活源模型并导出 STL，不打开工程图。文件 SHA-256 缓存在当前用户 `%LOCALAPPDATA%/SolidWorksAssetExporter/asset-file-hashes.json`，缓存键包含完整路径、文件大小和最后修改时间；缓存损坏或无法写入时只会退化为重新计算，不会阻断预览或导出。
 
-绝对目录、Asset 在父装配体中的实例位姿/配合、父装配体边界外的修改、上传地址和注册表时间戳不参与 Asset 版本判断。STL 只在原始指纹不一致时作为语义复核；manifest 仍校验所有原始导出文件的大小和 SHA-256。Robot 不生成 Asset 指纹或 manifest。同一 UUID 和 `asset_version` 的实际几何或发布属性变化时，插件不会自动覆盖或自动改版本，必须手动增加正整数 `asset_version`。
+绝对目录、Asset 在父装配体中的实例位姿和配合、父装配体边界外的修改、上传地址和注册表时间戳不参与 Asset 版本判断。原始指纹不一致时，插件使用 STL 做语义复核。manifest 校验所有原始导出文件的大小和 SHA-256。已发布资产的实际几何或发布属性变化时，插件计算并写入新版本。
 
 ### Property Tab Builder 模板与属性同步工具
 
@@ -166,7 +155,7 @@ Robot 使用独立的 UUIDv5 名称规则：namespace 为 `6ba7b811-9dad-11d1-80
 - `templates/custom-properties/draw.drwprp`：工程图。
 - `templates/custom-properties/properties.txt`：SOLIDWORKS 属性名称候选清单。
 
-`scripts/custom-properties.schema.csv` 是属性预览/同步脚本及 VBA 宏使用的保留字段清单。正式应用时会删除文件级中未列入 CSV 的属性；v1.0.5 已包含二维码、快换角色和新接口字段，并已移除 `accepts_robots`。正式应用前仍须先检查预览的删除/新增清单。
+`scripts/custom-properties.schema.csv` 是属性预览/同步脚本及 VBA 宏使用的保留字段清单。批量同步会保留插件维护的接口、槽位和版本属性，其余文件级属性按 CSV 添加或删除。应用前先检查预览清单。
 
 先运行只读预览并检查删除/新增清单，再决定是否应用：
 
@@ -275,6 +264,14 @@ XML 示例：
 ```
 
 Asset、装配包几何节点都是叶节点；Group 没有 mesh。装配包几何节点统一序列化为 `kind="meshes"`，不产生 `kind="project"` 或单数 `kind="mesh"`。XML 不输出 joint、轴或关节类型。混合拆分时至少要有一个可见、未抑制、非包络的固定顶层组件，并把固定组件优先写入节点序列，但不会把真实位姿归零。
+
+### 装配包上传后自动提交解析
+
+同时启用装配包导出和导出后上传时，可以勾选“上传装配包后自动提交解析”。此选项默认关闭。填写“解析服务地址”和“装配提供方令牌”，再在“Wanxiang 项目”中选择“项目编号”或“项目名称”，填入与现有项目匹配的值。解析服务地址单独配置。提供方令牌与数据服务 API key 分开保存，由当前 Windows 用户的 DPAPI 加密。
+
+装配包上传成功后，插件调用解析服务的 `POST /api/v1/integrations/assembly-packages/events` 提交 v2 事件。请求携带装配 UUID、版本、项目和 ZIP 内 `export-report.json` 原始字节的 SHA-256。相同装配版本、报告和项目选择会生成相同的 `event_id`，临时网络或服务故障时会用同一事件有限重试。
+
+HTTP `202` 表示解析任务已受理。导出窗口会显示任务 ID 和事件 ID，解析由服务端后台执行。通知失败时，导出窗口分别显示上传成功和解析提交失败，上传日志保留失败信息。
 
 ## 构建与测试
 
