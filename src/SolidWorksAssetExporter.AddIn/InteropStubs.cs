@@ -51,12 +51,20 @@ namespace SolidWorks.Interop.sldworks
         object GetParent();
         bool IsSuppressed(); int GetSuppression2(); int SetSuppression2(int state); bool IsEnvelope(); bool IsFixed(); bool IsHidden(bool considerSuppressed); bool Select4(bool append, object data, bool showPopup);
         object GetModelDoc2(); object GetChildren(); string GetPathName();
+        object GetBox(bool includeRefPlanes, bool includeSketches);
         bool IsVirtual { get; }
         MathTransform Transform2 { get; }
     }
     public interface Frame { long GetHWndx64(); }
 
     public interface MathTransform { object ArrayData { get; } }
+
+    public interface ModelView
+    {
+        event Func<int> BufferSwapNotify;
+        event Func<int> DestroyNotify;
+        void GraphicsRedraw(object rect);
+    }
 
     public interface ModelDoc2
     {
@@ -69,6 +77,7 @@ namespace SolidWorks.Interop.sldworks
         FeatureManager FeatureManager { get; }
         ModelDocExtension Extension { get; }
         object SelectionManager { get; }
+        ModelView IActiveView { get; }
         void ClearSelection2(bool all); bool ShowConfiguration2(string name); void GraphicsRedraw2();
     }
 
@@ -176,7 +185,8 @@ namespace SolidWorks.Interop.swconst
     public enum swSummInfoField_e { swSumInfoCreateDate = 6 }
     public enum swDocumentTypes_e { swDocPART = 1, swDocASSEMBLY = 2, swDocDRAWING = 3 }
     public enum swUserPreferenceIntegerValue_e { swStepAP, swStepExportPreference, swExportStlUnits, swSTLQuality,
-        swSystemColorsSelectedItem1, swSystemColorsSelectedItem2, swSystemColorsSelectedItem3 }
+        swSystemColorsSelectedItem1, swSystemColorsSelectedItem2, swSystemColorsSelectedItem3,
+        swSystemColorsSelectedItem4, swSystemColorsSelectedItem5, swSystemColorsSelectedItem6 }
     public enum swUserPreferenceToggle_e { swStepExportAtomicSave, swSTLBinaryFormat, swSTLDontTranslateToPositive, swSTLComponentsIntoOneFile, swSTLShowInfoOnSave, swSTLPreview, swSTLCheckForInterference }
     public enum swUserPreferenceStringValue_e { swExportOutputCoordinateSystem }
     public enum swAcisOutputGeometryPreference_e { swAcisOutputAsSolidAndSurface }

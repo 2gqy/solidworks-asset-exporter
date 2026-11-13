@@ -15,11 +15,15 @@ namespace SolidWorksAssetExporter.AddIn
         private readonly SldWorks _app;
         private readonly ModelDoc2 _document;
         private readonly SwInstanceBindings _session;
+        private readonly SwBindingViewport _viewport;
         private readonly int _configurationId;
         private readonly BindingEditorState _draft = new BindingEditorState();
         private readonly TextBox _parentText = new TextBox { ReadOnly = true, Dock = DockStyle.Fill };
         private readonly ListBox _childList = new ListBox { Dock = DockStyle.Fill, SelectionMode = SelectionMode.MultiExtended, HorizontalScrollbar = true };
         private readonly DataGridView _parents = Grid(false), _details = Grid(true);
+        private readonly DataGridView _assetGroups = Grid(false), _assetRelations = Grid(false);
+        private readonly TabControl _relationshipTabs = new TabControl { Dock = DockStyle.Fill };
+        private readonly TabPage _instanceTab = new TabPage("实例绑定");
         private readonly CheckBox _continuous = new CheckBox { Text = "连续点选子组件", AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
         private readonly CheckBox _chain = new CheckBox { Text = "链式绑定", AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
         private readonly CheckBox _highlightOnPick = new CheckBox { Text = "点选时高亮关联组件", Checked = true, AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
@@ -51,7 +55,12 @@ namespace SolidWorksAssetExporter.AddIn
         private readonly HashSet<string> _pickedRelationIds = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> _pickedParentContexts = new HashSet<string>(StringComparer.Ordinal);
         private readonly Dictionary<string, int> _pickedRoles = new Dictionary<string, int>(StringComparer.Ordinal);
+        private readonly Dictionary<string, int> _pickedAssetRoles = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<int, Color> _roleTints = new Dictionary<int, Color>();
+        private string _pickedAssetId;
+        private string _pickedAssetName;
+        private IList<InstanceBinding> _visualizedAssetRelations;
+        private Dictionary<string, string> _visualizedAssetIds;
         private string _highlightHint;
         private const string ParentPickHint = "在 SOLIDWORKS 中选一个父资产，再点击“读取父组件”。";
         private string _hint = ParentPickHint;
@@ -62,6 +71,7 @@ namespace SolidWorksAssetExporter.AddIn
             _session = SwInstanceBindings.ForDocument(_document);
             if (_session == null) throw new ValidationException("请先打开一个可写的总装配体。");
             _session.RequireWritable();
+            _viewport = new SwBindingViewport(_document);
             var current = _session.Current;
             _configurationId = current.ConfigurationId;
             Text = "承载关系 · " + _document.GetTitle() + " · " + current.ConfigurationName;
@@ -80,9 +90,12 @@ namespace SolidWorksAssetExporter.AddIn
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));
             layout.Controls.Add(new Label { Text = "在 SOLIDWORKS 中选父组件。子组件可 Ctrl 多选或在图形区框选，再点击“添加所选子组件”。", Dock = DockStyle.Fill }, 0, 0);
-            var parentBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
+            var parentBar = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3 };
             parentBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155)); parentBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            parentBar.Controls.Add(Button("读取父组件", CaptureParent)); parentBar.Controls.Add(_parentText); layout.Controls.Add(parentBar, 0, 1);
+            parentBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            parentBar.Controls.Add(Button("读取父组件", CaptureParent)); parentBar.Controls.Add(_parentText);
+            parentBar.Controls.Add(Button("接口属性 / 建议…", EditInterfaces, false));
+            layout.Controls.Add(parentBar, 0, 1);
             var childBar = Bar(); childBar.Controls.Add(_continuous);
             childBar.Controls.Add(Button("添加所选子组件", CaptureChildren)); childBar.Controls.Add(Button("同级同款批量添加", CaptureSiblings));
             childBar.Controls.Add(Button("移除选中子项", delegate { foreach (var e in _childList.SelectedItems.Cast<EndpointItem>().ToArray()) _draft.Children.Remove(e.Endpoint); RefreshDraft(); }));
@@ -94,24 +107,30 @@ namespace SolidWorksAssetExporter.AddIn
             applyBar.Controls.Add(Button("将所选子项作为父", ContinueFromSelected)); layout.Controls.Add(applyBar, 0, 4);
             var filterBar = Bar(); filterBar.Controls.Add(new Label { Text = "搜索父 / 子", AutoSize = true, Padding = new Padding(0, 7, 0, 0) }); filterBar.Controls.Add(_search);
             filterBar.Controls.Add(Button("查看全部", delegate { _search.Clear(); }));
-            filterBar.Controls.Add(Button("向所选父组件添加子项", AppendToSelectedParent));
+            var appendToInstance = Button("向所选父组件添加子项", AppendToSelectedParent);
+            filterBar.Controls.Add(appendToInstance);
             filterBar.Controls.Add(Button("校验已有关系", ValidateRelations));
             _assetIsolation = Button("仅显示普通资产", ToggleAssetIsolation);
             filterBar.Controls.Add(_assetIsolation);
             layout.Controls.Add(filterBar, 0, 5);
-            var summary = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 2 };
+            var summary = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 3 };
             summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             summary.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             summary.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             summary.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            summary.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             summary.Controls.Add(_totals, 0, 0);
             _highlightOnPick.Padding = Padding.Empty;
-            var selectionLegend = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
-            selectionLegend.Controls.Add(_highlightOnPick);
-            selectionLegend.Controls.Add(RoleLegend("同资产", SwBindingHighlight.AssetMark));
-            selectionLegend.Controls.Add(RoleLegend("直接父级", SwBindingHighlight.ParentMark));
-            selectionLegend.Controls.Add(RoleLegend("直接子级", SwBindingHighlight.ChildMark));
-            summary.Controls.Add(selectionLegend, 1, 0);
+            summary.Controls.Add(_highlightOnPick, 1, 0);
+            var selectionLegend = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Margin = Padding.Empty };
+            selectionLegend.Controls.Add(RoleLegend("点中实例", SwBindingHighlight.ClickedMark));
+            selectionLegend.Controls.Add(RoleLegend("实例父级", SwBindingHighlight.ParentMark));
+            selectionLegend.Controls.Add(RoleLegend("实例子级", SwBindingHighlight.ChildMark));
+            selectionLegend.Controls.Add(RoleLegend("同资产其他实例", SwBindingHighlight.AssetMark));
+            selectionLegend.Controls.Add(RoleLegend("资产父级", SwBindingHighlight.AssetParentMark));
+            selectionLegend.Controls.Add(RoleLegend("资产子级", SwBindingHighlight.AssetChildMark));
+            summary.Controls.Add(selectionLegend, 0, 1);
+            summary.SetColumnSpan(selectionLegend, 2);
             _interfaceIssues = Button("定位接口冲突", ShowInterfaceIssues, false);
             _interfaceIssues.ForeColor = Color.DarkRed;
             _interfaceIssues.Margin = new Padding(4);
@@ -119,7 +138,7 @@ namespace SolidWorksAssetExporter.AddIn
             _interfaceBanner.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             _interfaceBanner.Controls.Add(_interfaceSummary, 0, 0);
             _interfaceBanner.Controls.Add(_interfaceIssues, 1, 0);
-            summary.Controls.Add(_interfaceBanner, 0, 1);
+            summary.Controls.Add(_interfaceBanner, 0, 2);
             summary.SetColumnSpan(_interfaceBanner, 2);
             layout.Controls.Add(summary, 0, 6);
             _parents.Columns.Add("parent", "父组件（每个实例一行）"); _parents.Columns.Add("count", "子组件数"); _parents.Columns.Add("status", "状态");
@@ -130,9 +149,20 @@ namespace SolidWorksAssetExporter.AddIn
             _details.Columns[1].MinimumWidth = 62;
             _parents.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             _details.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
-            var split = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
-            split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 43)); split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 57));
-            split.Controls.Add(_parents, 0, 0); split.Controls.Add(_details, 1, 0); layout.Controls.Add(split, 0, 7);
+            var assetTab = new TabPage("资产关系");
+            _assetGroups.Columns.Add("asset", "资产（UUID / 版本）");
+            _assetGroups.Columns.Add("instances", "关联实例数");
+            _assetGroups.Columns[0].FillWeight = 78; _assetGroups.Columns[1].FillWeight = 22;
+            _assetRelations.Columns.Add("role", "方向");
+            _assetRelations.Columns.Add("asset", "关联资产");
+            _assetRelations.Columns.Add("count", "实例关系数");
+            _assetRelations.Columns[0].FillWeight = 16; _assetRelations.Columns[1].FillWeight = 65;
+            _assetRelations.Columns[2].FillWeight = 19;
+            assetTab.Controls.Add(RelationshipSplit(_assetGroups, _assetRelations));
+            _instanceTab.Controls.Add(RelationshipSplit(_parents, _details));
+            _relationshipTabs.TabPages.Add(assetTab);
+            _relationshipTabs.TabPages.Add(_instanceTab);
+            layout.Controls.Add(_relationshipTabs, 0, 7);
             var editBar = Bar(); editBar.Controls.Add(Button("高亮所选子关系", delegate { Highlight(SelectedRecords()); }));
             editBar.Controls.Add(Button("解除所选子关系", delegate { Unbind(false); })); editBar.Controls.Add(Button("解除整组关系…", delegate { Unbind(true); }));
             editBar.Controls.Add(Button("将所选子项加入本轮", LoadSelectedChildren)); layout.Controls.Add(editBar, 0, 8);
@@ -140,9 +170,19 @@ namespace SolidWorksAssetExporter.AddIn
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             footer.Controls.Add(Button("保存总装配", SaveAssembly)); footer.Controls.Add(_state); layout.Controls.Add(footer, 0, 9);
             Controls.Add(layout);
+            Action showInstanceActions = () =>
+            {
+                var editInstances = _relationshipTabs.SelectedTab == _instanceTab;
+                appendToInstance.Visible = editInstances;
+                editBar.Visible = editInstances;
+                layout.RowStyles[8].Height = editInstances ? 42 : 0;
+            };
+            _relationshipTabs.SelectedIndexChanged += delegate { showInstanceActions(); };
+            showInstanceActions();
+            _assetGroups.SelectionChanged += delegate { if (!_rendering) RenderAssetRelations(); };
             _parents.SelectionChanged += delegate { if (!_rendering) RenderDetails(); };
             _details.CellDoubleClick += delegate { Guard(delegate { Highlight(SelectedRecords()); }); };
-            _search.TextChanged += delegate { RenderGroups(); };
+            _search.TextChanged += delegate { RenderGroups(); RenderAssetGroups(); };
             _continuous.CheckedChanged += delegate
             {
                 ClearSelectionQueue();
@@ -203,6 +243,7 @@ namespace SolidWorksAssetExporter.AddIn
             {
                 _timer.Dispose();
                 ResetPickedHighlight();
+                _viewport.Dispose();
                 if (_assetsIsolated) RestoreAssetDisplay();
                 if (_selectionEvents != null)
                 {
@@ -224,6 +265,16 @@ namespace SolidWorksAssetExporter.AddIn
             return new DataGridView { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false, AllowUserToDeleteRows = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill, SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 MultiSelect = multi, RowHeadersVisible = false, AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.None, RowTemplate = { Height = 32 } };
+        }
+
+        private static Control RelationshipSplit(Control left, Control right)
+        {
+            var split = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+            split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 43));
+            split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 57));
+            split.Controls.Add(left, 0, 0);
+            split.Controls.Add(right, 1, 0);
+            return split;
         }
         private FlowLayoutPanel Bar() { return new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, AutoScroll = true }; }
         private Button Button(string text, Action action, bool resetHighlight = true)
@@ -427,60 +478,101 @@ namespace SolidWorksAssetExporter.AddIn
         private void HighlightPickedAsset(SelectionMgr selection, SwBindingEndpoints operation, ExportNode asset)
         {
             var context = SwInstanceBindings.Context(AssetComponent(asset));
-            var relations = _relationsByEndpoint[context].ToList();
-            var parents = relations.Where(relation => relation.Child.Context == context).Select(relation => relation.Parent);
-            var children = relations.Where(relation => relation.Parent.Context == context).Select(relation => relation.Child);
-            _pickedRoles[context] = SwBindingHighlight.AssetMark;
-            var roles = new Dictionary<string, Component2>(StringComparer.Ordinal);
-            var parentCount = AddHighlightRole(operation, parents, SwBindingHighlight.ParentMark, roles);
-            var childCount = AddHighlightRole(operation, children, SwBindingHighlight.ChildMark, roles);
-
-            var sameAssetCount = 1;
-            var peers = new List<Component2>();
+            var occurrences = new Dictionary<string, ExportNode>(StringComparer.Ordinal) { { context, asset } };
             foreach (var occurrence in operation.SameAssetInstances(asset))
+                occurrences[SwInstanceBindings.Context(AssetComponent(occurrence))] = occurrence;
+
+            var relations = new List<InstanceBinding>();
+            foreach (var relation in occurrences.Keys.SelectMany(key => _relationsByEndpoint[key]).Distinct().ToList())
             {
-                if (occurrence.Id == asset.Id) continue;
-                sameAssetCount++;
-                var component = AssetComponent(occurrence);
-                var occurrenceContext = SwInstanceBindings.Context(component);
-                if (_pickedRoles.ContainsKey(occurrenceContext)) continue;
-                _pickedRoles.Add(occurrenceContext, SwBindingHighlight.AssetMark);
-                peers.Add(component);
+                var parent = ResolveHighlightAsset(operation, relation.Parent);
+                var child = ResolveHighlightAsset(operation, relation.Child);
+                if (parent == null || child == null || (parent.AssetId != asset.AssetId && child.AssetId != asset.AssetId))
+                    continue;
+                occurrences[relation.Parent.Context] = parent;
+                occurrences[relation.Child.Context] = child;
+                relations.Add(relation);
             }
-            var highlighted = PaintHighlight(selection, roles, peers);
-            FollowPickedRelations(relations, context);
-            _highlightHint = "同资产 " + sameAssetCount + " 个，直接父级 " + parentCount + " 个，直接子级 " + childCount + " 个。";
-            var unavailable = peers.Count + parentCount + childCount - highlighted;
-            if (unavailable > 0) _highlightHint += " " + unavailable + " 个关联实例当前无法高亮。";
+
+            var relatedAssets = occurrences.Values.Where(node => node.AssetId != asset.AssetId)
+                .GroupBy(node => node.AssetId, StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToArray();
+            if (relatedAssets.Length > 0)
+            {
+                foreach (var occurrence in operation.SameAssetInstances(relatedAssets))
+                    occurrences[SwInstanceBindings.Context(AssetComponent(occurrence))] = occurrence;
+            }
+
+            var visualization = BindingEditorState.AssetVisualization(
+                occurrences.Select(pair => new BindingAssetOccurrence(pair.Key, pair.Value.AssetId)), context, relations);
+            foreach (var pair in visualization.Roles)
+                _pickedRoles[pair.Key] = HighlightMark(pair.Value);
+
+            var components = occurrences.ToDictionary(pair => pair.Key, pair => AssetComponent(pair.Value), StringComparer.Ordinal);
+            var expected = _pickedRoles.Count - 1;
+            var highlighted = PaintHighlight(selection, components, context);
+
+            _pickedAssetId = asset.AssetId;
+            _pickedAssetName = System.IO.Path.GetFileNameWithoutExtension(((SwCadNode)asset.Source).ClassificationModel.FileName);
+            _visualizedAssetRelations = visualization.AssetRelations;
+            _visualizedAssetIds = occurrences.ToDictionary(pair => pair.Key, pair => pair.Value.AssetId, StringComparer.Ordinal);
+            _pickedAssetRoles[asset.AssetId] = SwBindingHighlight.ClickedMark;
+            foreach (var relation in _visualizedAssetRelations.Where(relation => _visualizedAssetIds[relation.Child.Context] == asset.AssetId))
+            {
+                var parentId = _visualizedAssetIds[relation.Parent.Context];
+                if (!_pickedAssetRoles.ContainsKey(parentId))
+                    _pickedAssetRoles[parentId] = SwBindingHighlight.AssetParentMark;
+            }
+            foreach (var relation in _visualizedAssetRelations.Where(relation => _visualizedAssetIds[relation.Parent.Context] == asset.AssetId))
+            {
+                var childId = _visualizedAssetIds[relation.Child.Context];
+                if (!_pickedAssetRoles.ContainsKey(childId))
+                    _pickedAssetRoles[childId] = SwBindingHighlight.AssetChildMark;
+            }
+            RenderAssetGroups(asset.AssetId);
+            FollowPickedRelations(visualization.DirectRelations, context);
+            var direct = visualization.DirectRelations.Count;
+            var assetRelations = visualization.AssetRelations.Count;
+            _highlightHint = "同资产 " + occurrences.Values.Count(node => node.AssetId == asset.AssetId) +
+                " 个实例，当前实例 " + direct + " 条直接关系，资产共 " + assetRelations + " 条实例关系。";
+            if (highlighted < expected) _highlightHint += " " + (expected - highlighted) + " 个关联实例当前无法选中。";
         }
 
-        private int AddHighlightRole(SwBindingEndpoints operation, IEnumerable<BindingEndpoint> endpoints, int mark,
+        private static int HighlightMark(BindingAssetRole role)
+        {
+            switch (role)
+            {
+                case BindingAssetRole.Clicked: return SwBindingHighlight.ClickedMark;
+                case BindingAssetRole.DirectParent: return SwBindingHighlight.ParentMark;
+                case BindingAssetRole.DirectChild: return SwBindingHighlight.ChildMark;
+                case BindingAssetRole.SameAsset: return SwBindingHighlight.AssetMark;
+                case BindingAssetRole.AssetParent: return SwBindingHighlight.AssetParentMark;
+                case BindingAssetRole.AssetChild: return SwBindingHighlight.AssetChildMark;
+                default: throw new ArgumentOutOfRangeException("role");
+            }
+        }
+
+        private void AddHighlightRole(SwBindingEndpoints operation, IEnumerable<BindingEndpoint> endpoints, int mark,
             IDictionary<string, Component2> components)
         {
-            var added = 0;
             foreach (var group in endpoints.GroupBy(endpoint => endpoint.Context, StringComparer.Ordinal))
             {
                 if (_pickedRoles.ContainsKey(group.Key)) continue;
+                var asset = group.Select(endpoint => ResolveHighlightAsset(operation, endpoint)).FirstOrDefault(node => node != null);
                 _pickedRoles[group.Key] = mark;
-                components[group.Key] = ResolveHighlightComponent(operation, group);
-                added++;
+                components[group.Key] = asset == null ? null : AssetComponent(asset);
             }
-            return added;
         }
 
-        private int PaintHighlight(SelectionMgr selection, IDictionary<string, Component2> roles, IEnumerable<Component2> peers)
+        private int PaintHighlight(SelectionMgr selection, IDictionary<string, Component2> components, string manualContext = null)
         {
             _hasAutomaticSelection = true;
-            var highlighted = SwBindingHighlight.SelectMany(_document, selection, peers, SwBindingHighlight.AssetMark);
-            foreach (var mark in new[] { SwBindingHighlight.ParentMark, SwBindingHighlight.ChildMark })
-                highlighted += SwBindingHighlight.SelectMany(_document, selection,
-                    roles.Where(pair => pair.Value != null && _pickedRoles[pair.Key] == mark).Select(pair => pair.Value), mark);
+            var highlighted = 0;
+            foreach (var group in _pickedRoles.Where(pair => pair.Key != manualContext).GroupBy(pair => pair.Value))
+                highlighted += SwBindingHighlight.SelectMany(_document, selection, group.Select(pair => components[pair.Key]), group.Key);
             _hasAutomaticSelection = SwBindingHighlight.HasSelection(selection);
-            if (_hasAutomaticSelection)
-            {
-                SwBindingHighlight.ColorSelections(selection);
-                _document.GraphicsRedraw2();
-            }
+            var outlined = _viewport.Show(_pickedRoles.Where(pair => components[pair.Key] != null).Select(pair =>
+                new KeyValuePair<Component2, Color>(components[pair.Key], SwBindingHighlight.GetRoleColor(_app, pair.Value))));
+            if (_hasAutomaticSelection && outlined == 0) _document.GraphicsRedraw2();
             return highlighted;
         }
 
@@ -532,11 +624,15 @@ namespace SolidWorksAssetExporter.AddIn
         private void StyleRole(DataGridViewRow row, string context)
         {
             int mark;
-            var active = _pickedRoles.TryGetValue(context, out mark);
-            var color = active ? RoleTint(mark) : Color.Empty;
+            ColorRow(row, _pickedRoles.TryGetValue(context, out mark) ? mark : 0);
+        }
+
+        private void ColorRow(DataGridViewRow row, int mark)
+        {
+            var color = mark == 0 ? Color.Empty : RoleTint(mark);
             row.DefaultCellStyle.BackColor = color;
             row.DefaultCellStyle.SelectionBackColor = color;
-            row.DefaultCellStyle.SelectionForeColor = active ? SystemColors.WindowText : Color.Empty;
+            row.DefaultCellStyle.SelectionForeColor = mark == 0 ? Color.Empty : SystemColors.WindowText;
         }
 
         private Control RoleLegend(string text, int mark)
@@ -557,23 +653,31 @@ namespace SolidWorksAssetExporter.AddIn
 
         private static Component2 ResolveHighlightComponent(SwBindingEndpoints operation, IEnumerable<BindingEndpoint> endpoints)
         {
-            foreach (var endpoint in endpoints)
-            {
-                try
-                {
-                    return AssetComponent(operation.Resolve(endpoint));
-                }
-                catch (ValidationException) { }
-                catch (COMException) { }
-            }
+            var asset = endpoints.Select(endpoint => ResolveHighlightAsset(operation, endpoint)).FirstOrDefault(node => node != null);
+            return asset == null ? null : AssetComponent(asset);
+        }
+
+        private static ExportNode ResolveHighlightAsset(SwBindingEndpoints operation, BindingEndpoint endpoint)
+        {
+            try { return operation.ResolveVisualization(endpoint); }
+            catch (ValidationException) { }
+            catch (COMException) { }
             return null;
         }
 
         private void ResetPickedHighlight()
         {
             _highlightPending = false;
+            _viewport.Clear();
             _highlightHint = null;
             _lastPickedSelection = null;
+            var hadAssetPick = _pickedAssetId != null;
+            _pickedAssetId = null;
+            _pickedAssetName = null;
+            _visualizedAssetIds = null;
+            _visualizedAssetRelations = null;
+            _pickedAssetRoles.Clear();
+            if (hadAssetPick) RenderAssetGroups();
             if (_pickedRoles.Count > 0 || _pickedRelationIds.Count > 0)
             {
                 _pickedRoles.Clear();
@@ -835,7 +939,7 @@ namespace SolidWorksAssetExporter.AddIn
             var roles = new Dictionary<string, Component2>(StringComparer.Ordinal);
             AddHighlightRole(operation, relations.Select(relation => relation.Parent), SwBindingHighlight.ParentMark, roles);
             AddHighlightRole(operation, relations.Select(relation => relation.Child), SwBindingHighlight.ChildMark, roles);
-            var highlighted = PaintHighlight(selection, roles, Enumerable.Empty<Component2>());
+            var highlighted = PaintHighlight(selection, roles);
             _lastPickedSelection = string.Empty;
             StylePickedRows();
             _hint = "已高亮 " + highlighted + " 个承载关系实例。";
@@ -846,6 +950,114 @@ namespace SolidWorksAssetExporter.AddIn
             _session.Save(false);
             _hint = "总装配已保存。导出前请重新分类预览。";
             RefreshSaveStatus();
+        }
+
+        private void EditInterfaces()
+        {
+            _continuous.Checked = false;
+            var operation = Endpoints();
+            var records = _session.Current.Relations;
+            var endpoints = InterfaceSelection(operation, records);
+            if (endpoints.Count == 0)
+                throw new ValidationException("请选择要编辑接口的普通资产，或先读取本轮父、子组件。");
+
+            var resolved = endpoints.GroupBy(endpoint => endpoint.Context, StringComparer.Ordinal).Select(group => group.First())
+                .Select(endpoint => new { Endpoint = endpoint, Node = operation.ResolveVisualization(endpoint) }).ToList();
+            var allOccurrences = operation.SameAssetInstances(resolved.Select(item => item.Node))
+                .ToLookup(node => ((SwCadNode)node.Source).SourcePath, StringComparer.OrdinalIgnoreCase);
+            var items = new List<InterfaceEditorItem>();
+            foreach (var group in resolved.GroupBy(item => ((SwCadNode)item.Node.Source).SourcePath, StringComparer.OrdinalIgnoreCase))
+            {
+                var first = group.First();
+                var source = (SwCadNode)first.Node.Source;
+                // Binding picks tolerate pending assembly edits. A source editor must use its own dirty-state tracking.
+                var asset = new InterfaceAsset(new SwCadNode(_app, source.Component, source.InstancePath));
+                asset.Reload();
+                var occurrences = new HashSet<string>(allOccurrences[group.Key]
+                    .Select(node => SwInstanceBindings.Context(AssetComponent(node))), StringComparer.Ordinal);
+                occurrences.UnionWith(group.Select(item => item.Endpoint.Context));
+                var children = records.Where(record => occurrences.Contains(record.Parent.Context)).Select(record => record.Child);
+                if (_draft.Parent != null && occurrences.Contains(_draft.Parent.Context)) children = children.Concat(_draft.Children);
+                items.Add(new InterfaceEditorItem
+                {
+                    Asset = asset,
+                    AssetUuid = IdentityService.AssetUuid(source.ClassificationModel).ToString("D"),
+                    DisplayName = AssetName(first.Endpoint),
+                    InstanceCount = occurrences.Count,
+                    Endpoint = first.Endpoint,
+                    Children = children.GroupBy(child => child.Context, StringComparer.Ordinal).Select(child => child.First()).ToList()
+                });
+            }
+
+            var updateStamp = _document.GetUpdateStamp();
+            var suggestionSource = Endpoints();
+            using (var editor = new InterfacePropertiesDialog(items,
+                item =>
+                {
+                    EnsureContext();
+                    if (_document.GetUpdateStamp() != updateStamp)
+                        throw new ValidationException("总装配已变化，请重新打开接口编辑窗口。");
+                    Endpoints().ResolveVisualization(item.Endpoint);
+                },
+                endpoint =>
+                {
+                    EnsureContext();
+                    var child = suggestionSource.Resolve(endpoint);
+                    string value;
+                    return child.Properties.TryGetValue(PropertyRules.ConnectionInterface, out value) ? value : string.Empty;
+                },
+                () =>
+                {
+                    suggestionSource = Endpoints();
+                    updateStamp = _document.GetUpdateStamp();
+                }))
+            {
+                editor.ShowDialog(this);
+                if (editor.SavedAny)
+                {
+                    var fresh = Endpoints();
+                    RefreshRelations(_session.Current.Relations, fresh.Resolve);
+                    _hint = "接口已保存到资产源文件，请重新分类预览。";
+                    _draft.RefreshEndpoints(endpoint => fresh.Capture(fresh.ResolveVisualization(endpoint)));
+                    RefreshDraft();
+                }
+            }
+            RefreshSaveStatus();
+        }
+
+        private List<BindingEndpoint> InterfaceSelection(SwBindingEndpoints operation, IList<InstanceBinding> records)
+        {
+            var draft = new List<BindingEndpoint>();
+            if (_draft.Parent != null) draft.Add(_draft.Parent);
+            draft.AddRange(_draft.Children);
+            if (draft.Count != 0) return draft;
+
+            if (_relationshipTabs.SelectedTab == _instanceTab)
+            {
+                var selected = _details.SelectedRows.Cast<DataGridViewRow>().Select(row => ((RelationView)row.Tag).Record).ToList();
+                if (selected.Count == 0) selected = records.Where(record => record.Parent.Context == SelectedGroup()).ToList();
+                if (selected.Count != 0) return selected.SelectMany(record => new[] { record.Parent, record.Child }).ToList();
+            }
+            else
+            {
+                var selectedAsset = _assetRelations.SelectedRows.Count != 0 ? (string)_assetRelations.SelectedRows[0].Tag :
+                    _assetGroups.SelectedRows.Count != 0 ? (string)_assetGroups.SelectedRows[0].Tag : null;
+                if (selectedAsset != null)
+                {
+                    var selected = _views.SelectMany(view => new[]
+                    {
+                        new { Id = ViewAssetId(view, true), Endpoint = view.Record.Parent },
+                        new { Id = ViewAssetId(view, false), Endpoint = view.Record.Child }
+                    }).Where(item => string.Equals(item.Id, selectedAsset, StringComparison.OrdinalIgnoreCase))
+                        .Select(item => item.Endpoint).ToList();
+                    if (selected.Count != 0) return selected;
+                }
+            }
+
+            List<string> ignored;
+            var picked = CaptureSelected(operation, CurrentSelection(), out ignored);
+            if (picked.Count == 0 && ignored.Count != 0) throw new ValidationException(ignored[0]);
+            return picked;
         }
         private void ValidateRelations()
         {
@@ -876,6 +1088,8 @@ namespace SolidWorksAssetExporter.AddIn
                         view.Child = Label(child.Source.InstancePath, child.AssetId);
                         view.ParentName = InstanceName(parent.Source.InstancePath);
                         view.ChildName = InstanceName(child.Source.InstancePath);
+                        view.ParentAssetId = parent.AssetId;
+                        view.ChildAssetId = child.AssetId;
                         endpointsResolved = true;
                         InstanceBindingRules.ValidateConnection(parent, child);
                     }
@@ -897,6 +1111,7 @@ namespace SolidWorksAssetExporter.AddIn
                 : issues.Count + " 条接口不兼容";
             _interfaceIssues.Text = issues.Count == 1 ? "定位并查看原因" : "查看接口冲突";
             RenderGroups();
+            RenderAssetGroups();
             RefreshSaveStatus();
         }
 
@@ -955,6 +1170,7 @@ namespace SolidWorksAssetExporter.AddIn
 
         private void LocateInterfaceIssue(RelationView issue)
         {
+            _relationshipTabs.SelectedTab = _instanceTab;
             if (!Matches(issue)) _search.Clear();
             var parent = _parents.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => (string)row.Tag == issue.Record.Parent.Context);
             if (parent == null) return;
@@ -979,6 +1195,95 @@ namespace SolidWorksAssetExporter.AddIn
 
         private string SelectedGroup()
         { return _parents.SelectedRows.Count == 0 ? null : _parents.SelectedRows[0].Tag as string; }
+
+        private void RenderAssetGroups(string preferredAssetId = null)
+        {
+            var selected = preferredAssetId ?? (_assetGroups.SelectedRows.Count == 0 ? null : (string)_assetGroups.SelectedRows[0].Tag);
+            var endpoints = AssetViewRecords().SelectMany(view => new[]
+                { new { Id = ViewAssetId(view, true), Endpoint = view.Record.Parent },
+                  new { Id = ViewAssetId(view, false), Endpoint = view.Record.Child } });
+            var groups = endpoints.Where(item => !string.IsNullOrEmpty(item.Id))
+                .GroupBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(group => new { Id = group.Key, Name = AssetName(group.First().Endpoint),
+                    Count = group.Select(item => item.Endpoint.Context).Distinct(StringComparer.Ordinal).Count() }).ToList();
+            if (_pickedAssetId != null && !groups.Any(group => group.Id == _pickedAssetId))
+                groups.Add(new { Id = _pickedAssetId, Name = _pickedAssetName, Count = 0 });
+
+            _rendering = true;
+            try
+            {
+                _assetGroups.Rows.Clear();
+                foreach (var group in groups.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase).ThenBy(item => item.Id))
+                {
+                    var row = _assetGroups.Rows[_assetGroups.Rows.Add(group.Name + " | " + group.Id, group.Count)];
+                    row.Tag = group.Id;
+                    row.Cells[0].ToolTipText = group.Name + " | " + group.Id;
+                    int mark;
+                    if (_pickedAssetRoles.TryGetValue(group.Id, out mark)) ColorRow(row, mark);
+                }
+                var current = _assetGroups.Rows.Cast<DataGridViewRow>().FirstOrDefault(row => (string)row.Tag == selected) ??
+                    _assetGroups.Rows.Cast<DataGridViewRow>().FirstOrDefault();
+                if (current != null)
+                {
+                    _assetGroups.CurrentCell = current.Cells[0];
+                    current.Selected = true;
+                }
+            }
+            finally { _rendering = false; }
+            RenderAssetRelations();
+        }
+
+        private void RenderAssetRelations()
+        {
+            _assetRelations.Rows.Clear();
+            if (_assetGroups.SelectedRows.Count == 0) return;
+            var selected = (string)_assetGroups.SelectedRows[0].Tag;
+            var records = selected == _pickedAssetId && _visualizedAssetRelations != null
+                ? _views.Where(view => _visualizedAssetRelations.Contains(view.Record)).ToList()
+                : AssetViewRecords().ToList();
+            foreach (var isParent in new[] { true, false })
+            {
+                var related = records.Where(view => string.Equals(ViewAssetId(view, !isParent), selected, StringComparison.OrdinalIgnoreCase));
+                foreach (var group in related.Where(view => !string.IsNullOrEmpty(ViewAssetId(view, isParent)))
+                    .GroupBy(view => ViewAssetId(view, isParent), StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(group => AssetName(isParent ? group.First().Record.Parent : group.First().Record.Child), StringComparer.CurrentCultureIgnoreCase))
+                {
+                    var endpoint = isParent ? group.First().Record.Parent : group.First().Record.Child;
+                    var row = _assetRelations.Rows[_assetRelations.Rows.Add(isParent ? "父资产" : "子资产",
+                        AssetName(endpoint) + " | " + group.Key, group.Count())];
+                    row.Tag = group.Key;
+                    row.Cells[1].ToolTipText = string.Join(System.Environment.NewLine, group.Select(view => view.Parent + " → " + view.Child));
+                    if (selected == _pickedAssetId)
+                        ColorRow(row, isParent ? SwBindingHighlight.AssetParentMark : SwBindingHighlight.AssetChildMark);
+                    else
+                    {
+                        int mark;
+                        if (group.Key != null && _pickedAssetRoles.TryGetValue(group.Key, out mark)) ColorRow(row, mark);
+                    }
+                }
+            }
+            _assetRelations.ClearSelection();
+        }
+
+        private IEnumerable<RelationView> AssetViewRecords()
+        {
+            return _views.Where(view => Matches(view) || (_visualizedAssetRelations != null && _visualizedAssetRelations.Contains(view.Record)));
+        }
+
+        private string ViewAssetId(RelationView view, bool parent)
+        {
+            var endpoint = parent ? view.Record.Parent : view.Record.Child;
+            string current;
+            if (_visualizedAssetIds != null && _visualizedAssetIds.TryGetValue(endpoint.Context, out current)) return current;
+            return (parent ? view.ParentAssetId : view.ChildAssetId) ?? endpoint.AssetId;
+        }
+
+        private static string AssetName(BindingEndpoint endpoint)
+        {
+            return string.IsNullOrWhiteSpace(endpoint.SourcePath) ? InstanceName(endpoint.DisplayPath) :
+                System.IO.Path.GetFileNameWithoutExtension(endpoint.SourcePath);
+        }
+
         private bool Matches(RelationView v)
         { return string.IsNullOrWhiteSpace(_search.Text) || (v.Parent + " " + v.Child).IndexOf(_search.Text.Trim(), StringComparison.OrdinalIgnoreCase) >= 0; }
         private void RenderGroups()
@@ -1041,6 +1346,11 @@ namespace SolidWorksAssetExporter.AddIn
         private static string Display(BindingEndpoint e) { return Label(e.DisplayPath, e.AssetId); }
         private sealed class EndpointItem { public EndpointItem(BindingEndpoint e) { Endpoint = e; } public BindingEndpoint Endpoint; public override string ToString() { return Display(Endpoint); } }
         private sealed class ManualPick { public Component2 Component; public string Name; public bool WholeComponent; }
-        private sealed class RelationView { public InstanceBinding Record; public string Parent, Child, ParentName, ChildName, Error; public bool InterfaceIssue; }
+        private sealed class RelationView
+        {
+            public InstanceBinding Record;
+            public string Parent, Child, ParentName, ChildName, ParentAssetId, ChildAssetId, Error;
+            public bool InterfaceIssue;
+        }
     }
 }

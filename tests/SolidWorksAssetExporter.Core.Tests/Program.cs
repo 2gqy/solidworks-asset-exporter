@@ -2796,6 +2796,7 @@ namespace SolidWorksAssetExporter.Core.Tests
         public IList<int> SuppressionChanges { get; private set; }
         public FakePropertyManagerCollection CustomPropertyManager { get; private set; }
         public MathTransform Transform2 { get { return null; } }
+        public object GetBox(bool includeRefPlanes, bool includeSketches) { return null; }
         public int GetID() { return 1; }
         public object GetParent() { return ParentValue; }
         public bool IsSuppressed() { return SuppressionState != (int)swComponentSuppressionState_e.swComponentResolved; }
@@ -3000,6 +3001,7 @@ namespace SolidWorksAssetExporter.Core.Tests
         public FeatureManager FeatureManager { get { return null; } }
         public ModelDocExtension Extension { get { return ExtensionValue; } }
         public object SelectionManager { get { return null; } }
+        public ModelView IActiveView { get { return null; } }
         int ModelDoc2.GetType() { return DocumentType == 0 ? (int)swDocumentTypes_e.swDocPART : DocumentType; }
         public string GetPathName() { return _path; }
         public string GetTitle() { return _title; }

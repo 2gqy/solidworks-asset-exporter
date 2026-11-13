@@ -13,16 +13,21 @@ namespace SolidWorksAssetExporter.AddIn
         internal const int AssetMark = 1 << 29;
         internal const int ParentMark = 1 << 28;
         internal const int ChildMark = 1 << 27;
+        internal const int ClickedMark = 1 << 26;
+        internal const int AssetParentMark = 1 << 25;
+        internal const int AssetChildMark = 1 << 24;
+
+        private static readonly int[] Marks =
+            { ClickedMark, ParentMark, ChildMark, AssetMark, AssetParentMark, AssetChildMark };
 
         internal static bool IsAutomaticMark(int mark)
         {
-            return mark == AssetMark || mark == ParentMark || mark == ChildMark;
+            return Array.IndexOf(Marks, mark) >= 0;
         }
 
         internal static int AutomaticCount(SelectionMgr selection)
         {
-            return selection.GetSelectedObjectCount2(AssetMark) + selection.GetSelectedObjectCount2(ParentMark) +
-                selection.GetSelectedObjectCount2(ChildMark);
+            return Marks.Sum(mark => selection.GetSelectedObjectCount2(mark));
         }
 
         internal static bool HasSelection(SelectionMgr selection) { return AutomaticCount(selection) > 0; }
@@ -44,6 +49,7 @@ namespace SolidWorksAssetExporter.AddIn
             var before = selection.GetSelectedObjectCount2(mark);
             var data = selection.CreateSelectData();
             data.Mark = mark;
+            if (IsAutomaticMark(mark)) selection.set_SelectionColor(mark, ColorPreference(mark));
             try
             {
                 document.Extension.MultiSelect2(requested.Select(component => new DispatchWrapper(component)).ToArray(), true, data);
@@ -82,7 +88,7 @@ namespace SolidWorksAssetExporter.AddIn
 
         internal static void ColorSelections(SelectionMgr selection)
         {
-            foreach (var mark in new[] { AssetMark, ParentMark, ChildMark })
+            foreach (var mark in Marks)
                 selection.set_SelectionColor(mark, ColorPreference(mark));
         }
 
@@ -95,9 +101,12 @@ namespace SolidWorksAssetExporter.AddIn
         {
             switch (mark)
             {
-                case AssetMark: return (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem1;
+                case ClickedMark: return (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem1;
                 case ParentMark: return (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem2;
                 case ChildMark: return (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem3;
+                case AssetMark: return (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem4;
+                case AssetParentMark: return (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem5;
+                case AssetChildMark: return (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem6;
                 default: throw new ArgumentOutOfRangeException("mark");
             }
         }

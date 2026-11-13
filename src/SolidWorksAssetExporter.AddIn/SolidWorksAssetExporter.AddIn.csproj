@@ -63,8 +63,10 @@
     <Compile Include="InstanceBindingDialog.cs" />
     <Compile Include="SwBindingEndpoints.cs" />
     <Compile Include="SwBindingHighlight.cs" />
+    <Compile Include="SwBindingViewport.cs" />
     <Compile Include="BindingEditorState.cs" />
     <Compile Include="InterfaceEditing.cs" />
+    <Compile Include="InterfacePropertiesDialog.cs" />
     <Compile Include="SwInterfaceProperties.cs" />
     <Compile Include="SwCadNode.cs" />
     <Compile Include="SwDocumentWindowScope.cs" />

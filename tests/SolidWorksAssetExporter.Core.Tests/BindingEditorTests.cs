@@ -62,6 +62,7 @@ namespace SolidWorksAssetExporter.Core.Tests
             });
             Run("Binding picks visit only selected ancestry and preserve distinct occurrences", BindingTargetedSelection);
             Run("Binding visualization finds matching assets across CAD parents and filters non-asset leaves", BindingVisualizationFindsAssets);
+            Run("Asset visualization propagates confirmed relationship roles across matching versions", BindingVisualizationAssetRoles);
             Run("Binding reads native multi-selection and maps selected faces to components", delegate
             {
                 var part = new FakeSwComponent { NameValue = "Part-1" };
@@ -248,6 +249,11 @@ namespace SolidWorksAssetExporter.Core.Tests
                 var operation = new SwBindingEndpoints(new SldWorks { ActiveDoc = document }, null);
                 var picked = operation.FindSelectedAsset(internalBolt);
                 True(operation.SameAssetInstances(picked).Select(node => node.Name).SequenceEqual(new[] { first.Name2, second.Name2 }));
+                var alternateAsset = operation.FindSelectedAsset(alternate);
+                var previousReads = document.ComponentListReads;
+                True(operation.SameAssetInstances(new[] { picked, alternateAsset, picked }).Select(node => node.Name)
+                    .SequenceEqual(new[] { first.Name2, alternate.Name2, second.Name2 }));
+                Equal(previousReads + 1, document.ComponentListReads);
                 Equal(0, part.ExtensionValue.CustomPropertyManager.Manager("").Get6Calls);
                 Equal(0, root.ChildrenReads);
 
@@ -262,6 +268,72 @@ namespace SolidWorksAssetExporter.Core.Tests
                 Throws<ValidationException>(() => operation.FindSelectedAsset(bolt));
             }
             finally { Directory.Delete(directory, true); }
+        }
+
+        private static void BindingVisualizationAssetRoles()
+        {
+            var occurrences = new[]
+            {
+                new BindingAssetOccurrence("clicked", "center:3"),
+                new BindingAssetOccurrence("peer", "center:3"),
+                new BindingAssetOccurrence("unbound", "center:3"),
+                new BindingAssetOccurrence("center-old", "center:2"),
+                new BindingAssetOccurrence("parent", "parent:2"),
+                new BindingAssetOccurrence("parent-peer", "parent:2"),
+                new BindingAssetOccurrence("parent-old", "parent:1"),
+                new BindingAssetOccurrence("child", "child:4"),
+                new BindingAssetOccurrence("child-peer", "child:4"),
+                new BindingAssetOccurrence("child-old", "child:3"),
+                new BindingAssetOccurrence("peer-parent", "peer-parent:2"),
+                new BindingAssetOccurrence("peer-parent-peer", "peer-parent:2"),
+                new BindingAssetOccurrence("peer-child", "peer-child:2"),
+                new BindingAssetOccurrence("indirect", "indirect:1"),
+                new BindingAssetOccurrence("ambiguous", "parent:2"),
+                new BindingAssetOccurrence("ambiguous", "child:4")
+            };
+            var directParent = VisualizedRelation("parent", "clicked");
+            var directChild = VisualizedRelation("clicked", "child");
+            var sameAssetChild = VisualizedRelation("clicked", "peer");
+            var peerParent = VisualizedRelation("peer-parent", "peer");
+            var peerChild = VisualizedRelation("peer", "peer-child");
+            var relations = new[] { directParent, directChild, sameAssetChild, peerParent, peerChild,
+                VisualizedRelation("center-old", "parent-old"), VisualizedRelation("child", "indirect"),
+                VisualizedRelation("ambiguous", "clicked"), VisualizedRelation("missing", "clicked") };
+
+            var selected = BindingEditorState.AssetVisualization(occurrences, "clicked", relations);
+            Equal("center:3", selected.AssetId);
+            Equal(BindingAssetRole.Clicked, selected.Roles["clicked"]);
+            Equal(BindingAssetRole.DirectParent, selected.Roles["parent"]);
+            Equal(BindingAssetRole.DirectChild, selected.Roles["child"]);
+            Equal(BindingAssetRole.DirectChild, selected.Roles["peer"]);
+            Equal(BindingAssetRole.SameAsset, selected.Roles["unbound"]);
+            Equal(BindingAssetRole.AssetParent, selected.Roles["parent-peer"]);
+            Equal(BindingAssetRole.AssetChild, selected.Roles["child-peer"]);
+            Equal(BindingAssetRole.AssetParent, selected.Roles["peer-parent"]);
+            Equal(BindingAssetRole.AssetParent, selected.Roles["peer-parent-peer"]);
+            Equal(BindingAssetRole.AssetChild, selected.Roles["peer-child"]);
+            Equal(10, selected.Roles.Count);
+            True(selected.DirectRelations.SequenceEqual(new[] { directParent, directChild, sameAssetChild }));
+            True(selected.AssetRelations.SequenceEqual(new[] { directParent, directChild, sameAssetChild, peerParent, peerChild }));
+
+            var unbound = BindingEditorState.AssetVisualization(occurrences, "unbound", relations);
+            Equal(0, unbound.DirectRelations.Count);
+            True(unbound.AssetRelations.SequenceEqual(selected.AssetRelations));
+            Equal(BindingAssetRole.Clicked, unbound.Roles["unbound"]);
+            Equal(BindingAssetRole.SameAsset, unbound.Roles["clicked"]);
+            Equal(BindingAssetRole.SameAsset, unbound.Roles["peer"]);
+            Equal(BindingAssetRole.AssetParent, unbound.Roles["parent"]);
+            Equal(BindingAssetRole.AssetChild, unbound.Roles["child"]);
+            Equal(0, BindingEditorState.AssetVisualization(occurrences, "missing", relations).Roles.Count);
+        }
+
+        private static InstanceBinding VisualizedRelation(string parent, string child)
+        {
+            return new InstanceBinding
+            {
+                Parent = new BindingEndpoint { Context = parent, AssetId = "old-version" },
+                Child = new BindingEndpoint { Context = child, AssetId = "old-version" }
+            };
         }
 
         private static FakeSwComponent BindingSelectionComponent(string name, FakeSwDocument model, Component2 parent)
@@ -286,7 +358,8 @@ namespace SolidWorksAssetExporter.Core.Tests
             }
 
             internal object[] Components { get; set; }
-            public object GetComponents(bool topLevelOnly) { return Components; }
+            internal int ComponentListReads { get; private set; }
+            public object GetComponents(bool topLevelOnly) { ComponentListReads++; return Components; }
             public int GetLightWeightComponentCount() { return 0; }
             public int ResolveAllLightWeightComponents(bool warnUser) { throw new NotSupportedException(); }
             public bool Isolate() { throw new NotSupportedException(); }

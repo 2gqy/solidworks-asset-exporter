@@ -631,6 +631,7 @@ namespace SolidWorksAssetExporter.Core.Tests
         public string get_SummaryInfo(int field) { return "test"; }
         public bool IsOpenedReadOnly() { return false; } public bool Visible { get; set; }
         public ConfigurationManager ConfigurationManager { get { return Config; } }
+        public ModelView IActiveView { get { return null; } }
         public FeatureManager FeatureManager { get { return null; } }
         public ModelDocExtension Extension { get { return ReferenceExtension; } }
         public object SelectionManager { get { return null; } }

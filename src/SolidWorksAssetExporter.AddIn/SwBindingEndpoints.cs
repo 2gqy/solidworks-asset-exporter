@@ -34,9 +34,11 @@ namespace SolidWorksAssetExporter.AddIn
             _tracker = tracker ?? new SwPluginMutationTracker(app, true);
             _root = SwAssemblyRoot.FromActiveDocument(app, _tracker);
             Resolve = SwInstanceBindings.CacheResolver(ResolveStored);
+            ResolveVisualization = SwInstanceBindings.CacheResolver(ResolveVisualizationEndpoint);
         }
 
         internal Func<BindingEndpoint, ExportNode> Resolve { get; private set; }
+        internal Func<BindingEndpoint, ExportNode> ResolveVisualization { get; private set; }
 
         internal static Component2 SelectedComponent(SelectionMgr selection, int index, int mark = -1)
         {
@@ -98,18 +100,26 @@ namespace SolidWorksAssetExporter.AddIn
 
         internal IEnumerable<ExportNode> SameAssetInstances(ExportNode seed)
         {
+            return SameAssetInstances(new[] { seed });
+        }
+
+        internal IEnumerable<ExportNode> SameAssetInstances(IEnumerable<ExportNode> seeds)
+        {
             // The filename is part of the asset UUID. Filter before opening model documents so a
             // click in a large assembly only classifies likely matches and their ancestor chains.
-            var fileName = Canonical.Normalize(Path.GetFileName(((SwCadNode)seed.Source).SourcePath));
-            var matches = new List<ExportNode> { seed };
-            var seen = new HashSet<string>(StringComparer.Ordinal) { seed.Id };
+            var matches = seeds.GroupBy(seed => seed.Id, StringComparer.Ordinal).Select(group => group.First()).ToList();
+            if (matches.Count == 0) return matches;
+            var seen = new HashSet<string>(matches.Select(seed => seed.Id), StringComparer.Ordinal);
+            var assetIds = new HashSet<string>(matches.Select(seed => seed.AssetId), StringComparer.Ordinal);
+            var fileNames = new HashSet<string>(matches.Select(seed =>
+                Canonical.Normalize(Path.GetFileName(((SwCadNode)seed.Source).SourcePath))), StringComparer.Ordinal);
             var assembly = _app.ActiveDoc as AssemblyDoc;
             object[] components = null;
             try { if (assembly != null) components = assembly.GetComponents(false) as object[]; }
             catch (COMException) { }
             if (components == null || components.Length == 0)
             {
-                matches.AddRange(ReadVisualization().Assets.Where(asset => asset.AssetId == seed.AssetId && seen.Add(asset.Id)));
+                matches.AddRange(ReadVisualization().Assets.Where(asset => assetIds.Contains(asset.AssetId) && seen.Add(asset.Id)));
                 return matches;
             }
 
@@ -117,9 +127,9 @@ namespace SolidWorksAssetExporter.AddIn
             {
                 try
                 {
-                    if (Canonical.Normalize(Path.GetFileName(component.GetPathName())) != fileName) continue;
+                    if (!fileNames.Contains(Canonical.Normalize(Path.GetFileName(component.GetPathName())))) continue;
                     var asset = ReadBranch(component, 0).Asset;
-                    if (asset != null && asset.AssetId == seed.AssetId && asset.Name == component.Name2 && seen.Add(asset.Id))
+                    if (asset != null && assetIds.Contains(asset.AssetId) && asset.Name == component.Name2 && seen.Add(asset.Id))
                         matches.Add(asset);
                 }
                 catch (ValidationException) { }
@@ -185,11 +195,26 @@ namespace SolidWorksAssetExporter.AddIn
 
         private ExportNode ResolveStored(BindingEndpoint endpoint)
         {
+            return SwInstanceBindings.ValidateEndpoint(endpoint, ResolveStoredOccurrence(endpoint));
+        }
+
+        private ExportNode ResolveVisualizationEndpoint(BindingEndpoint endpoint)
+        {
+            var asset = ResolveStoredOccurrence(endpoint);
+            var source = (SwCadNode)asset.Source;
+            if (IdentityService.AssetIdentitySeed(source.ClassificationModel) != endpoint.SourceIdentity ||
+                !string.Equals(source.SourcePath, endpoint.SourcePath, StringComparison.OrdinalIgnoreCase))
+                throw new ValidationException("引用失效：[" + endpoint.DisplayPath + "] 的源模型已被替换，请解除后重新绑定。");
+            return asset;
+        }
+
+        private ExportNode ResolveStoredOccurrence(BindingEndpoint endpoint)
+        {
             var component = _session.ResolveComponent(endpoint);
             var asset = FindSelectedAsset(component);
             if (!string.Equals(asset.Source.Name, component.Name2, StringComparison.Ordinal))
                 throw new ValidationException("引用失效：[" + endpoint.DisplayPath + "] 已位于其他 Asset 内部。");
-            return SwInstanceBindings.ValidateEndpoint(endpoint, asset);
+            return asset;
         }
 
         private Branch ReadBranch(Component2 component, int depth)
