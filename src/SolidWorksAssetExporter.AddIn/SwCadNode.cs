@@ -70,7 +70,7 @@ namespace SolidWorksAssetExporter.AddIn
                         ? null : document.ConfigurationManager.ActiveConfiguration;
                     return configuration == null ? string.Empty : configuration.Name;
                 }
-                try { return Convert.ToString(((dynamic)_component).ReferencedConfiguration) ?? string.Empty; }
+                try { return _component.ReferencedConfiguration ?? string.Empty; }
                 catch { return string.Empty; }
             }
         }
@@ -360,6 +360,7 @@ namespace SolidWorksAssetExporter.AddIn
             if (names == null) return result;
             foreach (var name in names)
             {
+                if (name.Equals(PropertyRules.LegacyCanContain, StringComparison.OrdinalIgnoreCase)) continue;
                 string raw, resolved; bool wasResolved, linked;
                 manager.Get6(name, useCached, out raw, out resolved, out wasResolved, out linked);
                 result.Add(name, wasResolved && !string.IsNullOrEmpty(resolved) ? resolved : (raw ?? string.Empty));

@@ -26,8 +26,9 @@ namespace SolidWorksAssetExporter.AddIn
             var result = new InterfacePropertySnapshot();
             foreach (var name in (_manager.GetNames() as string[]) ?? new string[0])
             {
+                if (name.Equals(PropertyRules.LegacyCanContain, StringComparison.OrdinalIgnoreCase)) continue;
                 string raw, resolved; bool wasResolved, linked;
-                _manager.Get6(name, true, out raw, out resolved, out wasResolved, out linked);
+                _manager.Get6(name, false, out raw, out resolved, out wasResolved, out linked);
                 result.Raw[name] = raw ?? ""; result.Values[name] = wasResolved && !string.IsNullOrEmpty(resolved) ? resolved : raw ?? "";
                 result.Types[name] = _manager.GetType2(name);
                 if (linked || (wasResolved && raw != resolved) || (raw ?? "").IndexOf("$PRP", StringComparison.OrdinalIgnoreCase) >= 0 || (raw ?? "").StartsWith("=")) result.Linked.Add(name);
@@ -44,21 +45,29 @@ namespace SolidWorksAssetExporter.AddIn
     internal sealed class InterfaceAsset
     {
         private readonly SwCadNode _source;
+        private readonly string _backupRoot;
         internal InterfacePropertySnapshot Snapshot { get; private set; }
         internal ExportSourceFileSnapshot SourceSnapshot;
         internal string Path { get; private set; }
 
-        internal InterfaceAsset(SwCadNode source)
+        internal InterfaceAsset(SwCadNode source, string backupRoot = null)
         {
             _source = source;
+            _backupRoot = backupRoot ?? System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData),
+                "SolidWorksAssetExporter", "PropertyBackups");
             Path = source.SourcePath;
         }
 
-        internal void Reload()
+        internal void Reload(InterfacePropertySnapshot expected = null)
         {
-            if (SourceSnapshot == null) SourceSnapshot = ExportSourceFileSnapshot.Capture(Path, null);
-            else SourceSnapshot.ValidateUnchanged();
-            using (var lease = _source.OpenDocument()) Snapshot = ReadTarget(lease.Document).Read();
+            var sourceSnapshot = SourceSnapshot ?? ExportSourceFileSnapshot.Capture(Path, null);
+            sourceSnapshot.ValidateUnchanged();
+            InterfacePropertySnapshot properties;
+            using (var lease = _source.OpenDocument()) properties = ReadTarget(lease.Document).Read();
+            sourceSnapshot.ValidateUnchanged();
+            if (expected != null) InterfaceEditRules.RequireUnchanged(expected, properties);
+            Snapshot = properties;
+            SourceSnapshot = sourceSnapshot;
         }
 
         private SwInterfacePropertyTarget ReadTarget(ModelDoc2 doc)
@@ -69,7 +78,23 @@ namespace SolidWorksAssetExporter.AddIn
             return new SwInterfacePropertyTarget(doc, () => _source.HasUserChanges(doc));
         }
 
-        internal void Save(IDictionary<string, string> changes)
+        internal void ValidateForSave(IDictionary<string, string> changes)
+        {
+            if (changes.Count == 0) return;
+            SourceSnapshot.ValidateUnchanged();
+            using (var lease = _source.OpenDocument())
+                ValidateTarget(ReadTarget(lease.Document), changes);
+        }
+
+        private void ValidateTarget(SwInterfacePropertyTarget target, IDictionary<string, string> changes)
+        {
+            if (target.ReadOnly || target.Dirty) throw new ValidationException("源文件只读或有未保存修改：" + Path);
+            InterfaceEditRules.RequireUnchanged(Snapshot, target.Read());
+            if (changes.Keys.Any(Snapshot.Linked.Contains)) throw new ValidationException("待写入字段包含链接或表达式：" + Path);
+            SourceSnapshot.ValidateUnchanged();
+        }
+
+        internal void Save(IDictionary<string, string> changes, IEnumerable<string> allowedFields = null)
         {
             if (changes.Count == 0) return;
             SourceSnapshot.ValidateUnchanged();
@@ -77,14 +102,13 @@ namespace SolidWorksAssetExporter.AddIn
             {
                 var doc = lease.Document;
                 var target = ReadTarget(doc);
-                if (target.ReadOnly || target.Dirty) throw new ValidationException("源文件只读或有未保存修改，请先处理该文件再重试。");
-                InterfaceEditRules.RequireUnchanged(Snapshot, target.Read());
-                SourceSnapshot.ValidateUnchanged();
-                var backupDir = System.IO.Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "SolidWorksAssetExporter", "PropertyBackups", Guid.NewGuid().ToString("N"));
+                ValidateTarget(target, changes);
+                var backupDir = System.IO.Path.Combine(_backupRoot, Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(backupDir); var backup = System.IO.Path.Combine(backupDir, System.IO.Path.GetFileName(Path)); File.Copy(Path, backup, false);
+                SourceSnapshot.ValidateUnchanged();
                 try
                 {
-                    InterfacePropertyWriter.Apply(target, Snapshot, changes);
+                    InterfacePropertyWriter.Apply(target, Snapshot, changes, allowedFields ?? InterfaceEditRules.Fields);
                     Snapshot = target.Read();
                     SourceSnapshot = null;
                 }

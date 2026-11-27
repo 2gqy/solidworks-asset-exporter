@@ -135,9 +135,11 @@ function Sync-Document($document, [object[]]$schemaRows, [bool]$applyChanges) {
     $existing = @{}
     foreach ($name in $existingNames) { $existing[$name] = $true }
 
-    $managed = @('connection_interface', 'accepts_interfaces', 'slots_num', 'asset_version', 'assembly_version')
-    $remove = @($existingNames | Where-Object { $_ -notin $managed -and -not $required.Contains($_) })
-    $add = @($required.Keys | Where-Object { $_ -notin $managed -and -not $existing.ContainsKey($_) })
+    $preserveOnly = @('connection_interface', 'accepts_interfaces', 'slots_num', 'asset_version', 'assembly_version', 'can_hold_contents', 'slot_type', 'engagement')
+    # Leave obsolete source data available for an explicit one-time migration.
+    $preserveOnly += 'can_contain'
+    $remove = @($existingNames | Where-Object { $_ -notin $preserveOnly -and -not $required.Contains($_) })
+    $add = @($required.Keys | Where-Object { $_ -notin $preserveOnly -and -not $existing.ContainsKey($_) })
     if ($remove.Count -eq 0 -and $add.Count -eq 0) {
         Write-Host "UNCHANGED [$kind] $path"
         return

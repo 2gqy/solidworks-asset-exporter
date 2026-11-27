@@ -132,7 +132,7 @@ namespace SolidWorksAssetExporter.AddIn
                         registrations.Count.ToString(CultureInfo.InvariantCulture);
                     Report(progress, log, "正在上传 Asset " + ordinal + "：" + registration.AssetId);
                     var published = client.PublishAssetVersion(directory, registration.Uuid,
-                        registration.Version, registration.ContentFingerprint);
+                        registration.Version, registration.ContentFingerprint, registration.Name);
                     completion.AssetDirectoriesUploaded++;
                     if (published.Status == "registered") completion.AssetVersionsRegistered++;
                     else completion.AssetVersionsAlreadyRegistered++;

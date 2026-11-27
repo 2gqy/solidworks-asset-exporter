@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using SolidWorksAssetExporter.AddIn;
+using SolidWorksAssetExporter.Core;
 using SolidWorksAssetExporter.Mcp;
 
 namespace SolidWorksAssetExporter.Core.Tests
@@ -9,6 +11,9 @@ namespace SolidWorksAssetExporter.Core.Tests
     {
         private static void RunMcpTests()
         {
+            RunMcpBindingEvidenceTests();
+            RunMcpBindingPlanTests();
+            RunMcpAssetPropertiesTests();
             Run("MCP negotiates protocol, accepts notifications and advertises model tools", delegate
             {
                 Func<string, Dictionary<string, object>, object> unused = (name, args) =>
@@ -25,6 +30,34 @@ namespace SolidWorksAssetExporter.Core.Tests
                 True(tools.Any(tool => Equals(tool["name"], "binding_add")));
                 True(tools.Any(tool => Equals(tool["name"], "asset_update_interfaces")));
                 True(tools.Any(tool => Equals(tool["name"], "asset_export")));
+                Equal(17, tools.Count);
+                var copyPlan = tools.Single(tool => Equals(tool["name"], "binding_duplicate_plan"));
+                var copyApply = tools.Single(tool => Equals(tool["name"], "binding_duplicate_apply"));
+                Equal(true, McpProtocol.Object(copyPlan["annotations"])["readOnlyHint"]);
+                Equal(false, McpProtocol.Object(copyApply["annotations"])["readOnlyHint"]);
+                var plan = tools.Single(tool => Equals(tool["name"], "binding_plan"));
+                var apply = tools.Single(tool => Equals(tool["name"], "binding_apply"));
+                Equal(true, McpProtocol.Object(plan["annotations"])["readOnlyHint"]);
+                Equal(false, McpProtocol.Object(apply["annotations"])["readOnlyHint"]);
+                True(((object[])McpProtocol.Object(apply["inputSchema"])["required"]).Contains("plan_token"));
+                foreach (var tool in new[] { plan, apply })
+                {
+                    var properties = McpProtocol.Object(McpProtocol.Object(tool["inputSchema"])["properties"]);
+                    True(!properties.ContainsKey("slot_type"));
+                    True(!properties.ContainsKey("engagement"));
+                }
+            });
+
+            Run("Binding bootstrap uses explicit interfaces and preserves existing parent capabilities", delegate
+            {
+                var child = new InterfacePropertySnapshot();
+                Throws<ValidationException>(() => InterfaceEditRules.BootstrapConnection(child, null, "Tube-1"));
+                Equal("试管.D20", InterfaceEditRules.BootstrapConnection(child, "试管.D20", "Tube-1"));
+                child.Values[PropertyRules.ConnectionInterface] = "试管.D20";
+                Equal("试管.D20", InterfaceEditRules.BootstrapConnection(child, null, "Tube-1"));
+                Throws<ValidationException>(() => InterfaceEditRules.BootstrapConnection(child, "试管.D18", "Tube-1"));
+                Equal("试管.D18;试管.D20", string.Join(";", InterfaceEditRules.Suggest("试管.D18",
+                    new[] { "试管.D20", "试管.D20" })));
             });
 
             Run("MCP validates write arguments before dispatch and preserves Unicode", delegate
@@ -48,6 +81,24 @@ namespace SolidWorksAssetExporter.Core.Tests
                 result = McpProtocol.Object(ParseMcp(McpProtocol.Respond(request, (name, args) =>
                     { throw new InvalidOperationException("Save failed."); }))["result"]);
                 Equal(true, result["isError"]);
+            });
+
+            Run("MCP rejects instance coupling arguments on binding writes", delegate
+            {
+                var request = new Dictionary<string, object>
+                {
+                    { "document_path", "assembly" }, { "configuration", "Default" },
+                    { "parent", "Ring-1" }, { "children", new object[] { "Bottle-1" } }
+                };
+                foreach (var field in new[] { "slot_type", "engagement" })
+                {
+                    request.Add(field, "example");
+                    Throws<ArgumentException>(() => McpProtocol.ToolArguments("binding_add", request));
+                    Throws<ArgumentException>(() => McpProtocol.ToolArguments("binding_plan", request));
+                    var apply = new Dictionary<string, object>(request) { { "plan_token", "token" } };
+                    Throws<ArgumentException>(() => McpProtocol.ToolArguments("binding_apply", apply));
+                    request.Remove(field);
+                }
             });
         }
 

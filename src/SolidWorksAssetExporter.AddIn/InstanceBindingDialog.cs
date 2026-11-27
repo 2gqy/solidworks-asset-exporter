@@ -101,8 +101,9 @@ namespace SolidWorksAssetExporter.AddIn
             childBar.Controls.Add(Button("移除选中子项", delegate { foreach (var e in _childList.SelectedItems.Cast<EndpointItem>().ToArray()) _draft.Children.Remove(e.Endpoint); RefreshDraft(); }));
             childBar.Controls.Add(Button("清空本轮", delegate { _draft.Clear(); _continuous.Checked = false; _document.ClearSelection2(true); _hint = ParentPickHint; RefreshDraft(); }));
             childBar.Controls.Add(_childCount); layout.Controls.Add(childBar, 0, 2); layout.Controls.Add(_childList, 0, 3);
-            var applyBar = Bar(); applyBar.Controls.Add(Button("应用绑定", delegate { Apply(false); }));
-            applyBar.Controls.Add(Button("替换全部父组件…", delegate { Apply(true); })); applyBar.Controls.Add(_chain);
+            var applyBar = Bar(); applyBar.Controls.Add(Button("应用绑定", () => Apply(false)));
+            applyBar.Controls.Add(Button("原位复制并绑定…", DuplicateSelected));
+            applyBar.Controls.Add(Button("替换全部父组件…", () => Apply(true))); applyBar.Controls.Add(_chain);
             applyBar.Controls.Add(new Label { Text = "下一父组件", AutoSize = true, Padding = new Padding(8, 7, 0, 0) }); applyBar.Controls.Add(_nextParent);
             applyBar.Controls.Add(Button("将所选子项作为父", ContinueFromSelected)); layout.Controls.Add(applyBar, 0, 4);
             var filterBar = Bar(); filterBar.Controls.Add(new Label { Text = "搜索父 / 子", AutoSize = true, Padding = new Padding(0, 7, 0, 0) }); filterBar.Controls.Add(_search);
@@ -165,7 +166,8 @@ namespace SolidWorksAssetExporter.AddIn
             layout.Controls.Add(_relationshipTabs, 0, 7);
             var editBar = Bar(); editBar.Controls.Add(Button("高亮所选子关系", delegate { Highlight(SelectedRecords()); }));
             editBar.Controls.Add(Button("解除所选子关系", delegate { Unbind(false); })); editBar.Controls.Add(Button("解除整组关系…", delegate { Unbind(true); }));
-            editBar.Controls.Add(Button("将所选子项加入本轮", LoadSelectedChildren)); layout.Controls.Add(editBar, 0, 8);
+            editBar.Controls.Add(Button("将所选子项加入本轮", LoadSelectedChildren));
+            editBar.Controls.Add(Button("复用所选槽位…", ReuseSelectedSlot)); layout.Controls.Add(editBar, 0, 8);
             var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2 };
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             footer.Controls.Add(Button("保存总装配", SaveAssembly)); footer.Controls.Add(_state); layout.Controls.Add(footer, 0, 9);
@@ -292,12 +294,13 @@ namespace SolidWorksAssetExporter.AddIn
         }
         private void Guard(Action action, bool resetHighlight = true)
         {
-            if (McpRunning != null && McpRunning()) return;
-            var previousBusy = _busy; _busy = true;
+            if (_busy || (McpRunning != null && McpRunning())) return;
+            _busy = true;
             try { EnsureContext(); if (resetHighlight) ResetPickedHighlight(); action(); }
             catch (Exception ex) { _continuous.Checked = false; MessageBox.Show(this, ex.Message, "承载关系", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
-            finally { _busy = previousBusy; }
+            finally { _busy = false; }
         }
+
         private SwBindingEndpoints Endpoints() { return new SwBindingEndpoints(_app, _session); }
 
         private List<Component2> CurrentSelection()
@@ -851,13 +854,42 @@ namespace SolidWorksAssetExporter.AddIn
             _nextParent.Items.Clear(); foreach (var e in _draft.NextParents) _nextParent.Items.Add(new EndpointItem(e));
             _nextParent.Enabled = _draft.NextParents.Count > 0; _nextParent.SelectedIndex = -1;
         }
-        private void Apply(bool replace)
+        private void ReuseSelectedSlot()
+        {
+            var selected = SelectedRecords();
+            if (selected.Count != 1) throw new ValidationException("请在实例明细中选择一条已有关系作为槽位参考。");
+            Apply(false, selected[0]);
+        }
+
+        private void DuplicateSelected()
+        {
+            if (_draft.Parent == null || _draft.Children.Count != 1)
+                throw new ValidationException("请读取目标父组件，并只选一个要原位复制的子资产实例。");
+            var plan = _session.PrepareDuplicate(_app, _draft.Parent, _draft.Children[0], null);
+            var preview = "在当前配置的总装层原位复制并保存：\n" + Display(plan.Original) + "\n目标父组件：" +
+                Display(plan.Parent) + (plan.ReplacedId == null ? "" : "\n复制后迁移目标父组件的那条旧关系，沿用原槽位。");
+            if (MessageBox.Show(this, preview, "确认原位复制并绑定", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+                return;
+            EnsureContext();
+            var result = _session.ApplyDuplicate(_app, plan);
+            _draft.Clear();
+            _continuous.Checked = false;
+            _document.ClearSelection2(true);
+            RefreshDraft();
+            RefreshRelations(_session.Current.Relations, Endpoints().Resolve);
+            _hint = "已原位复制并保存 " + result.Relation.Child.DisplayName + "。备份：" + result.BackupPath;
+            RefreshSaveStatus();
+        }
+
+        private void Apply(bool replace, InstanceBinding slotReference = null)
         {
             _session.RequireWritable();
-            if (_draft.Parent == null || _draft.Children.Count == 0) throw new ValidationException("请选择一个父组件和至少一个子组件。");
+            var parent = _draft.Parent ?? (slotReference == null ? null : slotReference.Parent);
+            if (parent == null || _draft.Children.Count == 0) throw new ValidationException("请选择父组件并将待安装的实例加入本轮子组件。");
             var records = _session.Current.Relations; var revision = _session.Revision;
             var resolve = Endpoints().Resolve;
-            var proposed = InstanceBindingRules.Apply(records, _draft.Parent, _draft.Children, resolve, replace);
+            var proposed = InstanceBindingRules.Apply(records, parent, _draft.Children, resolve, replace,
+                slotReference == null ? null : slotReference.Id);
             if (records.Select(r => r.Id).SequenceEqual(proposed.Select(r => r.Id)))
             {
                 _hint = "这些父子关系已存在。";
@@ -865,7 +897,9 @@ namespace SolidWorksAssetExporter.AddIn
                 return;
             }
             var updateStamp = _document.GetUpdateStamp();
-            if (!ConfirmBatch(records, replace, _draft.Parent, _draft.Children)) return;
+            var contact = SwContactDiagnostics.ForBinding(_app, _document, resolve(parent), _draft.Children.Select(resolve))
+                .Where(value => value.NeedsReview).Select(value => value.Message).ToArray();
+            if (!ConfirmBatch(records, replace, parent, _draft.Children, slotReference, contact)) return;
             if (_document.GetUpdateStamp() != updateStamp)
                 throw new ValidationException("装配在确认期间已改变，请重新应用绑定。");
             var continuous = _continuous.Checked;
@@ -874,10 +908,12 @@ namespace SolidWorksAssetExporter.AddIn
             if (_draft.Parent != null) _continuous.Checked = continuous;
             _hint = _draft.NextParents.Count > 0 ? "已绑定。请从“下一父组件”选择一个已绑定子组件，继续下一层。" :
                 _draft.Parent != null ? "已绑定，子组件已接续为父组件。继续点选下一层子组件。" : "已绑定并清空本轮选择，可读取下一父组件。请保存总装配。";
+            if (slotReference != null) _hint = "已复用槽位并记录各子组件偏移。请保存总装配。";
         }
-        private bool ConfirmBatch(List<InstanceBinding> records, bool replace, BindingEndpoint parent, IList<BindingEndpoint> children)
+        private bool ConfirmBatch(List<InstanceBinding> records, bool replace, BindingEndpoint parent, IList<BindingEndpoint> children,
+            InstanceBinding slotReference, string[] contact)
         {
-            using (var dialog = new Form { Text = replace ? "确认替换全部父组件（仅保留本轮父组件）" : "确认新增绑定（保留已有父组件）", Size = new Size(980, 540), StartPosition = FormStartPosition.CenterParent, Font = Font, MinimizeBox = false, MaximizeBox = false })
+            using (var dialog = new Form { Text = replace ? "确认替换全部父组件（仅保留本轮父组件）" : "确认新增绑定", Size = new Size(980, 540), StartPosition = FormStartPosition.CenterParent, Font = Font, MinimizeBox = false, MaximizeBox = false })
             {
                 var table = Grid(false); table.Columns.Add("child", "子组件"); table.Columns.Add("old", replace ? "全部已有父组件（将被替换）" : "已有父组件（保留）"); table.Columns.Add("next", "本轮父组件");
                 foreach (var c in children)
@@ -886,7 +922,17 @@ namespace SolidWorksAssetExporter.AddIn
                 var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 44, FlowDirection = FlowDirection.RightToLeft };
                 var ok = new Button { Text = "确认 " + children.Count + " 项", AutoSize = true, DialogResult = DialogResult.OK };
                 var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel }; buttons.Controls.Add(ok); buttons.Controls.Add(cancel);
-                dialog.Controls.Add(table); dialog.Controls.Add(buttons); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
+                dialog.Controls.Add(table); dialog.Controls.Add(buttons);
+                if (contact.Length != 0)
+                    dialog.Controls.Add(new TextBox { ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Bottom,
+                        Height = Math.Min(140, 30 + 40 * contact.Length), Text = "请核对父子实体接触\r\n" + string.Join("\r\n", contact) });
+                if (slotReference != null)
+                {
+                    dialog.Text = "确认复用槽位";
+                    dialog.Controls.Add(new Label { Dock = DockStyle.Top, Height = 48, Padding = new Padding(8),
+                        Text = "参考子组件 " + Display(slotReference.Child) + "\n请确认待绑定子组件已定位在同一槽位。插件将按当前 CAD 位姿计算偏移。" });
+                }
+                dialog.AcceptButton = ok; dialog.CancelButton = cancel;
                 return dialog.ShowDialog(this) == DialogResult.OK;
             }
         }
@@ -898,7 +944,7 @@ namespace SolidWorksAssetExporter.AddIn
         private void LoadSelectedChildren()
         {
             var selected = SelectedRecords(); _continuous.Checked = false; _draft.Clear(); _draft.AddChildren(selected.Select(r => r.Child));
-            _document.ClearSelection2(true); RefreshDraft(); _hint = "已读取子组件；读取新父后点击“应用绑定”新增关系，或“替换全部父组件…”移除其他父级。";
+            _document.ClearSelection2(true); RefreshDraft(); _hint = "已读取子组件。读入新父组件后，可原位复制并绑定，或替换原实例的父组件。";
         }
         private void ContinueFromSelected()
         {
@@ -984,6 +1030,7 @@ namespace SolidWorksAssetExporter.AddIn
                     AssetUuid = IdentityService.AssetUuid(source.ClassificationModel).ToString("D"),
                     DisplayName = AssetName(first.Endpoint),
                     InstanceCount = occurrences.Count,
+                    MaximumBoundSlots = _session.RequiredSlotCapacity(asset.Path, records),
                     Endpoint = first.Endpoint,
                     Children = children.GroupBy(child => child.Context, StringComparer.Ordinal).Select(child => child.First()).ToList()
                 });
@@ -1074,6 +1121,7 @@ namespace SolidWorksAssetExporter.AddIn
             _relationsByEndpoint = BindingEditorState.IndexRelatedInstances(records);
             _relationsValidated = resolve != null;
             _views = new List<RelationView>();
+            var multiple = InstanceBindingRules.MultipleParentBindingIds(records);
             foreach (var relation in records)
             {
                 var view = new RelationView { Record = relation, Parent = Display(relation.Parent), Child = Display(relation.Child) };
@@ -1099,6 +1147,11 @@ namespace SolidWorksAssetExporter.AddIn
                         view.InterfaceIssue = endpointsResolved;
                     }
                     catch (COMException ex) { view.Error = ex.Message; }
+                }
+                if (multiple.Contains(relation.Id))
+                {
+                    view.LegacyMultipleParents = true;
+                    view.Error = (view.Error == null ? "" : view.Error + "\n") + "历史关系中此实例有多个承载父组件，请原位复制并迁移。";
                 }
                 _views.Add(view);
             }
@@ -1310,8 +1363,9 @@ namespace SolidWorksAssetExporter.AddIn
             foreach (var v in _views.Where(v => v.Record.Parent.Context == group && Matches(v)))
             {
                 var parents = parentsByChild[v.Record.Child.Context].GroupBy(p => p.Context, StringComparer.Ordinal).Select(g => g.First()).ToArray();
-                var status = v.InterfaceIssue ? "接口不兼容" : v.Error ?? SavedState();
-                var row = _details.Rows[_details.Rows.Add(v.Child, parents.Length, status)]; row.Tag = v; row.Cells[0].ToolTipText = v.Child;
+                var status = v.LegacyMultipleParents ? "旧多父待迁移" : v.InterfaceIssue ? "接口不兼容" : v.Error ?? SavedState();
+                var row = _details.Rows[_details.Rows.Add(v.Child, parents.Length, status)]; row.Tag = v;
+                row.Cells[0].ToolTipText = v.Record.SlotId == null ? v.Child : v.Child + "\n共享槽位 ID " + v.Record.SlotId;
                 if (v.InterfaceIssue) MarkInterfaceStatus(row.Cells[2]);
                 if (_pickedRoles.Count > 0) StylePickedChild(row, v);
                 row.Cells[1].ToolTipText = string.Join(System.Environment.NewLine, parents.Select(Display)); row.Cells[2].ToolTipText = v.Error;
@@ -1350,7 +1404,7 @@ namespace SolidWorksAssetExporter.AddIn
         {
             public InstanceBinding Record;
             public string Parent, Child, ParentName, ChildName, ParentAssetId, ChildAssetId, Error;
-            public bool InterfaceIssue;
+            public bool InterfaceIssue, LegacyMultipleParents;
         }
     }
 }

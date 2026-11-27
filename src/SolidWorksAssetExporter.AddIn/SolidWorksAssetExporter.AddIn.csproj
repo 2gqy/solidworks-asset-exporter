@@ -52,11 +52,17 @@
     <Compile Include="FileFingerprintCache.cs" />
     <Compile Include="ExportSourceSnapshot.cs" />
     <Compile Include="ExportCoordinator.cs" />
+    <Compile Include="ContactDiagnostics.cs" />
+    <Compile Include="SwContactDiagnostics.cs" />
     <Compile Include="ExportDialog.cs" />
     <Compile Include="Settings.cs" />
     <Compile Include="SwAddin.cs" />
     <Compile Include="McpPipeServer.cs" />
     <Compile Include="McpSolidWorksTools.cs" />
+    <Compile Include="McpBindingPlan.cs" />
+    <Compile Include="McpAssetProperties.cs" />
+    <Compile Include="McpAssetPropertyRules.cs" />
+    <Compile Include="McpBindingEvidence.cs" />
     <Compile Include="SwManagedVersions.cs" />
     <Compile Include="..\SolidWorksAssetExporter.Mcp\McpProtocol.cs"><Link>McpProtocol.cs</Link></Compile>
     <Compile Include="SwInstanceBindings.cs" />
@@ -66,6 +72,7 @@
     <Compile Include="SwBindingViewport.cs" />
     <Compile Include="BindingEditorState.cs" />
     <Compile Include="InterfaceEditing.cs" />
+    <Compile Include="SharedInterfaceCatalog.cs" />
     <Compile Include="InterfacePropertiesDialog.cs" />
     <Compile Include="SwInterfaceProperties.cs" />
     <Compile Include="SwCadNode.cs" />

@@ -111,7 +111,7 @@ namespace SolidWorksAssetExporter.Core.Tests
                 d.Children.RemoveAt(0); d.AddChildren(new[] { f.E("T3") }); Equal("T2", d.Children[0].Context); Equal(2, d.Children.Count);
             });
             Run("Binding editor shows every parent of a shared child in separate groups", delegate {
-                var f = new BindingFixture(); f.Apply("A", false, "T1", "T2"); f.Apply("B", false, "T1");
+                var f = new BindingFixture(); f.Apply("A", false, "T1", "T2"); f.AddLegacy("B", "T1");
                 var groups = BindingEditorState.Group(f.Records).ToList(); Equal(2, groups.Count);
                 Equal(2, groups.Count(g => g.Any(r => r.Child.Context == "T1")));
                 var parents = BindingEditorState.Parents(f.Records, f.E("T1")); Equal(2, parents.Count);
@@ -351,6 +351,10 @@ namespace SolidWorksAssetExporter.Core.Tests
 
         private sealed class BindingSelectionAssembly : FakeSwDocument, AssemblyDoc
         {
+            public Component2 AddComponent5(string path, int configOption, string newConfigName, bool useExistingConfig,
+                string existingConfigName, double x, double y, double z) { throw new NotSupportedException(); }
+            public bool SetComponentState(int suppression, object components, int configurationOption, string configuration, bool saveClosedDocuments)
+            { throw new NotSupportedException(); }
             internal BindingSelectionAssembly(string path) : base(Path.GetFileName(path), path, true)
             {
                 DocumentType = (int)swDocumentTypes_e.swDocASSEMBLY;

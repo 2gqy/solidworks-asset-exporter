@@ -48,6 +48,7 @@ namespace SolidWorksAssetExporter.Mcp
                 if (type == "string" && arg.Value is string ||
                     type == "integer" && arg.Value is int && (int)arg.Value >= 0 ||
                     type == "boolean" && arg.Value is bool ||
+                    type == "object" && arg.Value is Dictionary<string, object> ||
                     type == "array" && arg.Value is object[] && ((object[])arg.Value).All(value => value is string))
                     continue;
                 throw new ArgumentException("参数 " + arg.Key + " 的类型或取值无效。");
@@ -70,15 +71,33 @@ namespace SolidWorksAssetExporter.Mcp
     {
         private static readonly string[] Target = { "document_path:string", "configuration:string" };
         private static readonly string[] Paging = { "offset:integer", "limit:integer" };
+        private static readonly string[] BindingGroup = Target.Concat(new[] { "parent:string", "children:strings" }).ToArray();
+        private static readonly string[] DuplicateBinding = Target.Concat(new[] { "parent:string", "child:string" }).ToArray();
+        private const string ReuseSlot = "reuse_slot_from_binding_id:string";
+        private static readonly string[] BindingOptions = { "connection_interface:string", "slots_num:integer", ReuseSlot };
+        private static readonly string[] PropertyTarget = Target.Concat(new[] { "instance:string", "source_path:string", "properties:object" }).ToArray();
         private static readonly McpTool[] Tools =
         {
             new McpTool("assembly_context", "读取活动 SOLIDWORKS 装配文档路径、配置和保存状态。", true, new string[0]),
-            new McpTool("interface_catalog", "读取当前 Windows 用户的接口候选名称。", true, new string[0]),
-            new McpTool("interface_catalog_add", "向当前 Windows 用户的接口候选库追加名称。", false, new[] { "names:strings" }),
-            new McpTool("asset_list", "列出活动装配内的资产实例及文件级接口、容量和版本。limit 默认 100，最多 500。", true, Target, Paging),
-            new McpTool("binding_list", "读取活动配置的承载关系和端点校验结果。limit 默认 100，最多 500。", true, Target, Paging),
-            new McpTool("binding_add", "新增并保存显式承载关系，保留已有父级。parent 和 children 使用 asset_list 的 instance。重复关系可安全重试。", false,
-                Target.Concat(new[] { "parent:string", "children:strings" }).ToArray()),
+            new McpTool("interface_catalog", "读取 Wanxiang 在线接口候选名称。服务不可用时返回本地候选及提示。", true, new string[0]),
+            new McpTool("interface_catalog_add", "向 Wanxiang 在线接口候选库追加已确认的名称。", false, new[] { "names:strings" }),
+            new McpTool("asset_list", "列出活动装配内的资产实例及文件级接口、槽位定义、容量和版本。limit 默认 100，最多 500。", true, Target, Paging),
+            new McpTool("component_list", "分页列出活动配置可见的零部件、当前资产分类和文件级自定义属性。包括未分类组件，已有 Asset 装配体为扫描边界。", true, Target, Paging),
+            new McpTool("asset_properties_plan", "只读预检零部件的分类和文件级自定义属性。仅在 slots_num 为正整数时可填写 slot_type。engagement 可填写 tight 或 loose。返回计划令牌、同源实例和待补接口。", true, PropertyTarget),
+            new McpTool("asset_properties_apply", "用 asset_properties_plan 的原参数和 plan_token 写入文件级自定义属性。修改作用于整个源文件，普通资产版本由插件维护。", false,
+                PropertyTarget.Concat(new[] { "plan_token:string" }).ToArray()),
+            new McpTool("binding_evidence", "读取资产实例的 CAD 上级、世界坐标原点、固定状态和可读取的双端配合。配合与位置用于核对设计依据。limit 默认 100，最多 500。", true, Target, Paging),
+            new McpTool("binding_list", "读取活动配置的承载关系、端点和旧多父诊断。limit 默认 100，最多 500。", true, Target, Paging),
+            new McpTool("binding_add", "新增并保存承载关系。每个子实例只能有一个承载父级。slots_num 仅在显式传入已确认的设计容量时写入；实际占用独立返回。可复用同一父组件下的已有槽位。", false,
+                BindingGroup, ReuseSlot, "slots_num:integer"),
+            new McpTool("binding_plan", "只读预检承载关系并返回 plan_token。可填写 connection_interface、已确认的设计 slots_num 或 reuse_slot_from_binding_id。绑定数不推断设计容量。", true,
+                BindingGroup, BindingOptions),
+            new McpTool("binding_apply", "用 binding_plan 的原参数和 plan_token 重新校验后，保存所需文件级接口与版本，再保存当前配置的承载关系。", false,
+                BindingGroup.Concat(new[] { "plan_token:string" }).ToArray(), BindingOptions),
+            new McpTool("binding_duplicate_plan", "只读预检在当前配置原位复制一个普通资产实例并绑定到指定父级。如指定的父级已承载原实例且原实例还有其他父级，计划迁移该条旧关系并保留槽位。", true,
+                DuplicateBinding, ReuseSlot),
+            new McpTool("binding_duplicate_apply", "用原参数与 plan_token 复核后，原位复制实例并保存当前配置的承载关系。", false,
+                DuplicateBinding.Concat(new[] { "plan_token:string" }).ToArray(), ReuseSlot),
             new McpTool("asset_update_interfaces", "维护资产文件的向上接口、兼容接口和总槽位。省略的字段保留，空字符串或空数组可清除接口。sync_accepts_from_bindings 追加当前配置已绑定子级声明的接口。slots_num 是已确认的总容量。", false,
                 Target.Concat(new[] { "instance:string", "source_path:string" }).ToArray(),
                 "connection_interface:string", "accepts_interfaces:strings", "slots_num:integer", "sync_accepts_from_bindings:boolean"),

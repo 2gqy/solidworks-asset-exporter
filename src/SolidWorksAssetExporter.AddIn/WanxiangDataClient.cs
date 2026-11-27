@@ -24,6 +24,15 @@ namespace SolidWorksAssetExporter.AddIn
     }
 
     [DataContract]
+    internal sealed class WanxiangDirectoryEntry
+    {
+        [DataMember(Name = "name", IsRequired = true)] public string Name { get; set; }
+        [DataMember(Name = "type", IsRequired = true)] public string Type { get; set; }
+        [DataMember(Name = "size", IsRequired = true)] public long Size { get; set; }
+        [DataMember(Name = "mtime", IsRequired = true)] public double Modified { get; set; }
+    }
+
+    [DataContract]
     public sealed class WanxiangDirectoryUploadResult
     {
         [DataMember(Name = "path")] public string Path { get; set; }
@@ -112,6 +121,12 @@ namespace SolidWorksAssetExporter.AddIn
         public WanxiangDataClient(string baseUrl, string apiKey, Action<string> diagnostic)
             : this(baseUrl, apiKey, CreateHandler(), diagnostic)
         {
+        }
+
+        internal WanxiangDataClient(string baseUrl, string apiKey, HttpMessageHandler handler, TimeSpan timeout)
+            : this(baseUrl, apiKey, handler, null)
+        {
+            _http.Timeout = timeout;
         }
 
         public WanxiangDataClient(string baseUrl, string apiKey, HttpMessageHandler handler,
@@ -219,6 +234,47 @@ namespace SolidWorksAssetExporter.AddIn
             }
         }
 
+        internal List<WanxiangDirectoryEntry> ListDirectory(string remoteDirectory)
+        {
+            using (var response = _http.GetAsync(Url("list", remoteDirectory)).GetAwaiter().GetResult())
+            {
+                if (response.StatusCode == HttpStatusCode.NotFound) return new List<WanxiangDirectoryEntry>();
+                var body = ReadBody(response);
+                EnsureSuccess(response, body);
+                if (response.StatusCode != HttpStatusCode.OK) throw new InvalidDataException("Wanxiang 未返回完整的目录列表。");
+                return Deserialize<List<WanxiangDirectoryEntry>>(body);
+            }
+        }
+
+        internal byte[] DownloadFileBytes(string remotePath)
+        {
+            using (var response = _http.GetAsync(Url("files", remotePath)).GetAwaiter().GetResult())
+            {
+                if (!response.IsSuccessStatusCode) EnsureSuccess(response, ReadBody(response));
+                if (response.StatusCode != HttpStatusCode.OK || response.Content == null)
+                    throw new InvalidDataException("Wanxiang 未返回完整的接口候选文件。");
+                return response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+            }
+        }
+
+        internal void UploadJsonFile(string remotePath, byte[] bytes)
+        {
+            using (var content = new ByteArrayContent(bytes))
+            {
+                content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+                using (var response = _http.PutAsync(Url("files", remotePath), content).GetAwaiter().GetResult())
+                {
+                    var body = ReadBody(response);
+                    EnsureSuccess(response, body);
+                    var result = Deserialize<WanxiangFileUploadResult>(body);
+                    if ((response.StatusCode != HttpStatusCode.Created && response.StatusCode != HttpStatusCode.OK) ||
+                        result == null || result.Path != WanxiangRemotePath.Normalize(remotePath) ||
+                        result.Size != bytes.LongLength || result.Overwritten != (response.StatusCode == HttpStatusCode.OK))
+                        throw new InvalidDataException("Wanxiang 未确认写入指定的接口候选文件。");
+                }
+            }
+        }
+
         public bool DownloadFileIfExists(string remotePath, string localPath)
         {
             localPath = Path.GetFullPath(localPath);
@@ -318,7 +374,7 @@ namespace SolidWorksAssetExporter.AddIn
         }
 
         public WanxiangAssetRegistrationResult PublishAssetVersion(string localDirectory, string uuid,
-            int version, string contentFingerprint)
+            int version, string contentFingerprint, string expectedName = null)
         {
             localDirectory = Path.GetFullPath(localDirectory);
             if (!Directory.Exists(localDirectory))
@@ -381,6 +437,7 @@ namespace SolidWorksAssetExporter.AddIn
                             !string.Equals(result.Registration.Uuid, normalizedUuid,
                                 StringComparison.OrdinalIgnoreCase) || result.Registration.Version != version ||
                             string.IsNullOrWhiteSpace(result.Registration.Name) ||
+                            (expectedName != null && !string.Equals(result.Registration.Name, expectedName, StringComparison.Ordinal)) ||
                             !string.Equals((result.Registration.RelativeDirectory ?? string.Empty).Replace('\\', '/'),
                                 expectedRelativeDirectory, StringComparison.OrdinalIgnoreCase) ||
                             !string.Equals(result.Registration.ContentFingerprint, contentFingerprint,

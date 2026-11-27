@@ -28,6 +28,8 @@ namespace SolidWorksAssetExporter.Core.Tests
         {
             RunMcpTests();
             RunInstanceBindingTests();
+            RunExportPlacementDiagnosticTests();
+            RunContactDiagnosticTests();
             Run("Asset boundary never reads children", AssetBoundaryNeverReadsChildren);
             Run("Asset subassembly stays opaque", AssetSubassemblyStaysOpaque);
             Run("Asset parent skips child property validation", AssetParentSkipsChildPropertyValidation);
@@ -76,6 +78,7 @@ namespace SolidWorksAssetExporter.Core.Tests
             Run("Pack and Go may omit embedded virtual model paths", PackAndGoMayOmitEmbeddedVirtualPaths);
             Run("Pack and Go activates the Asset subassembly only", PackAndGoActivatesAssetSubassemblyOnly);
             Run("Pack and Go isolates references outside the Asset boundary", PackAndGoExcludesOutsideAssetReferences);
+            Run("Pack and Go accepts embedded 3D Interconnect compound references", PackAndGoAcceptsInterconnectCompoundReferences);
             Run("Pack and Go accepts a shorter status array when Asset outputs exist", PackAndGoAcceptsShorterStatusArray);
             Run("Pack and Go does not require an embedded virtual child output", PackAndGoAllowsEmbeddedVirtualChild);
             Run("Asset registry persists one entry per Asset ID", AssetRegistryPersistsOneEntryPerAssetId);
@@ -1626,6 +1629,46 @@ namespace SolidWorksAssetExporter.Core.Tests
             finally { Directory.Delete(temp, true); }
         }
 
+        private static void PackAndGoAcceptsInterconnectCompoundReferences()
+        {
+            var temp = TempDirectory();
+            try
+            {
+                var assetPath = Path.Combine(temp, "asset.SLDASM");
+                var childPath = Path.Combine(temp, "child.SLDPRT");
+                var stepPath = Path.Combine(temp, "original.STEP");
+                foreach (var path in new[] { assetPath, childPath, stepPath }) File.WriteAllText(path, path);
+                var compound = Path.Combine(Path.GetTempPath(), "swx12160", "IC~~", "original.STEP.SLDASM") + "|" + stepPath;
+                var asset = new FakeSwDocument("asset.SLDASM", assetPath, true)
+                {
+                    DocumentType = (int)swDocumentTypes_e.swDocASSEMBLY
+                };
+                var app = new FakeSldWorks(asset);
+                var packAndGo = new FakePackAndGo(delegate { return new[] { assetPath, childPath, compound }; });
+                packAndGo.SetDocumentSaveToNames(new object[] { assetPath, childPath, stepPath });
+                packAndGo.OmittedSourcePaths.Add(compound);
+                asset.ExtensionValue.PackAndGoValue = packAndGo;
+                var node = new SwCadNode(app, new FakeSwComponent
+                {
+                    PathValue = assetPath,
+                    VisibleValue = (int)swComponentVisibilityState_e.swComponentVisible,
+                    SuppressionState = (int)swComponentSuppressionState_e.swComponentResolved,
+                    ModelDocumentWhenResolved = asset
+                }, "/asset");
+                var destination = Path.Combine(temp, "packed");
+                var packager = new SwSourcePackager(app, new SwPluginMutationTracker(app));
+                packager.PackAsset(node, new[] { assetPath, childPath }, destination);
+                True(File.Exists(Path.Combine(destination, "asset.SLDASM")));
+                True(File.Exists(Path.Combine(destination, "child.SLDPRT")));
+                True(!File.Exists(Path.Combine(destination, "original.STEP")));
+
+                var missing = Path.Combine(temp, "missing.SLDPRT");
+                Throws<ValidationException>(() => packager.PackAsset(node, new[] { assetPath, childPath, missing },
+                    Path.Combine(temp, "missing-output")));
+            }
+            finally { Directory.Delete(temp, true); }
+        }
+
         private static void PackAndGoAcceptsShorterStatusArray()
         {
             var temp = TempDirectory();
@@ -2771,6 +2814,7 @@ namespace SolidWorksAssetExporter.Core.Tests
     {
         public FakeSwComponent()
         {
+            ComponentId = 1;
             NameValue = "fake-component";
             PathValue = "C:\\models\\fake-component.SLDPRT";
             ReferencedConfiguration = string.Empty;
@@ -2791,19 +2835,29 @@ namespace SolidWorksAssetExporter.Core.Tests
         public object ChildrenValue { get; set; }
         public Component2 ParentValue { get; set; }
         public int ChildrenReads { get; private set; }
+        public bool IsRootValue { get; set; }
+        public bool IsFixedValue { get; set; }
+        public int ComponentId { get; set; }
+        public object MatesValue { get; set; }
+        public System.Runtime.InteropServices.COMException MatesError { get; set; }
         public bool IsVirtual { get; set; }
+        public int Solving { get; set; }
+        public object TestSolidBodies { get; set; }
+        public object TestBodyInfo { get; set; }
+        public object GetBodies3(int type, out object bodyInfo) { bodyInfo = TestBodyInfo; return TestSolidBodies; }
         public ModelDoc2 ModelDocumentWhenResolved { get; set; }
         public IList<int> SuppressionChanges { get; private set; }
         public FakePropertyManagerCollection CustomPropertyManager { get; private set; }
-        public MathTransform Transform2 { get { return null; } }
+        public MathTransform Transform2 { get; set; }
         public object GetBox(bool includeRefPlanes, bool includeSketches) { return null; }
-        public int GetID() { return 1; }
+        public int GetID() { return ComponentId; }
         public object GetParent() { return ParentValue; }
+        public bool IsRoot() { return IsRootValue; }
         public bool IsSuppressed() { return SuppressionState != (int)swComponentSuppressionState_e.swComponentResolved; }
         public int GetSuppression2() { return SuppressionState; }
         public int SetSuppression2(int state) { SuppressionChanges.Add(state); SuppressionState = state; return 2; }
         public bool IsEnvelope() { return false; }
-        public bool IsFixed() { return false; }
+        public bool IsFixed() { return IsFixedValue; }
         public bool IsHidden(bool considerSuppressed) { return SuppressionState == (int)swComponentSuppressionState_e.swComponentLightweight; }
         public bool Select4(bool append, object data, bool showPopup) { return true; }
         public object GetModelDoc2()
@@ -2813,6 +2867,11 @@ namespace SolidWorksAssetExporter.Core.Tests
                 ? ModelDocumentWhenResolved : null;
         }
         public object GetChildren() { ChildrenReads++; return ChildrenValue; }
+        public object GetMates()
+        {
+            if (MatesError != null) throw MatesError;
+            return MatesValue;
+        }
         public string GetPathName() { return PathValue; }
     }
 
@@ -3007,7 +3066,7 @@ namespace SolidWorksAssetExporter.Core.Tests
         public string GetTitle() { return _title; }
         public bool GetSaveFlag() { return SaveFlag; }
         public void SetSaveFlag() { SaveFlag = true; }
-        public bool Save3(int options, ref int errors, ref int warnings) { throw new NotSupportedException(); }
+        public virtual bool Save3(int options, ref int errors, ref int warnings) { throw new NotSupportedException(); }
         public object IGet3rdPartyStorage(string name, bool storing) { return null; }
         public void IRelease3rdPartyStorage(string name) { }
         public int GetUpdateStamp() { return UpdateStamp; }
@@ -3016,18 +3075,46 @@ namespace SolidWorksAssetExporter.Core.Tests
         public void ClearSelection2(bool all) { }
         public void GraphicsRedraw2() { }
         public bool ShowConfiguration2(string name) { return true; }
+        public virtual double ClosestDistance(object first, object second, out object point1, out object point2)
+        { point1 = point2 = null; return -1; }
+        public object GetConfigurationNames() { return ConfigurationManager == null ? new string[0] : new[] { ConfigurationManager.ActiveConfiguration.Name }; }
+        public object GetConfigurationByName(string name)
+        { return ConfigurationManager == null || ConfigurationManager.ActiveConfiguration.Name != name ? null : ConfigurationManager.ActiveConfiguration; }
+        public bool EditRebuild3() { throw new NotSupportedException(); }
+        public bool IsEditingSelf() { return true; }
     }
 
     internal sealed class FakeModelDocExtension : ModelDocExtension
     {
         public bool SelectByID2(string name, string type, double x, double y, double z, bool append, int mark, object callout, int option) { return false; }
         public int MultiSelect2(object objects, bool append, object data) { return 0; }
+        public bool DeleteSelection2(int options) { throw new NotSupportedException(); }
         public int PersistReferenceReads { get; private set; }
-        public object GetPersistReference3(object value) { return null; }
-        public object GetObjectByPersistReference3(object bytes, out int error) { PersistReferenceReads++; error = 1; return null; }
+        public IDictionary<int, Component2> PersistentComponents { get; private set; }
+        public object GetPersistReference3(object value)
+        {
+            var component = value as Component2;
+            return component != null && PersistentComponents.ContainsKey(component.GetID())
+                ? BitConverter.GetBytes(component.GetID()) : null;
+        }
+        public object GetObjectByPersistReference3(object bytes, out int error)
+        {
+            PersistReferenceReads++;
+            var reference = bytes as byte[];
+            Component2 component;
+            if (reference != null && reference.Length == sizeof(int) &&
+                PersistentComponents.TryGetValue(BitConverter.ToInt32(reference, 0), out component))
+            {
+                error = 0;
+                return component;
+            }
+            error = 1;
+            return null;
+        }
         public FakeModelDocExtension()
         {
             CustomPropertyManager = new FakePropertyManagerCollection();
+            PersistentComponents = new Dictionary<int, Component2>();
         }
 
         public FakePropertyManagerCollection CustomPropertyManager { get; private set; }
